@@ -4,7 +4,6 @@ path: C:/date/AI-TOD
 train: C:/date\AI-TOD/images/train
 val: C:/date/AI-TOD/images/val
 
-
 nc: 8
 names:
   0: pedestrian

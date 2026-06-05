@@ -17,11 +17,13 @@ from ultralytics.nn.modules import (
     C2,
     C2PSA,
     C3,
-    C3TR,
     C3STR,
+    C3TR,
     ELAN1,
+    NASFPN,
     OBB,
     PSA,
+    RHDWT,
     SPP,
     SPPELAN,
     SPPF,
@@ -39,12 +41,14 @@ from ultralytics.nn.modules import (
     C3x,
     CBFuse,
     CBLinear,
+    CE_Head,
     Classify,
     Concat,
     Conv,
     Conv1x1_Equal,
     Conv2,
     ConvTranspose,
+    DeepSupervisionDetect,
     Detect,
     Detect_CFDH,
     DWConv,
@@ -52,13 +56,14 @@ from ultralytics.nn.modules import (
     Focus,
     GhostBottleneck,
     GhostConv,
-    RHDWT,
     HGBlock,
     HGStem,
     ImagePoolingAttn,
     Index,
     LRPCHead,
     Pose,
+    R3Head,
+    RDC_Head,
     RepC3,
     RepConv,
     RepNCSPELAN4,
@@ -72,34 +77,27 @@ from ultralytics.nn.modules import (
     YOLOEDetect,
     YOLOESegment,
     v10Detect,
-    CE_Head,
-    R3Head,
-    RDC_Head,
-    NASFPN,
-    DeepSupervisionDetect,
 )
 from ultralytics.nn.modules.block import (
-    RFAConv,
-    SADEConv,
-    MSRA_RFAConv,
-    StandardRFAConv,
     CARAFE,
-    HDRAB,
-    EdgeSkipGate,
-    DynamicAttention,
     CPCA,
+    EMA,
+    FCSA,
+    CEAttention,
+    DAUBlock,
+    DynamicAttention,
+    EdgeSkipGate,
+    MSRA_RFAConv,
     PolarizedAttention,
     RDAttention,
-    DAUBlock,
-    CEAttention,
-    EMA,
-    SCBlock,
-    VGASBlock,
     RepVGGBlock,
+    RFAConv,
+    SADEConv,
+    SCBlock,
     SDC_Selective_Fusion,
-    FCSA,
+    StandardRFAConv,
+    VGASBlock,
 )
-from ultralytics.nn.modules.ESSamp import ESSamp
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -1749,7 +1747,20 @@ def parse_model(d, ch, verbose=True):
             args = [c1, *args]  # EdgeSkipGate(c1, k, reduction)
             c2 = c1
         elif m in frozenset(
-            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect,CE_Head,R3Head,RDC_Head}
+            {
+                Detect,
+                WorldDetect,
+                YOLOEDetect,
+                Segment,
+                YOLOESegment,
+                Pose,
+                OBB,
+                ImagePoolingAttn,
+                v10Detect,
+                CE_Head,
+                R3Head,
+                RDC_Head,
+            }
         ):
             args.append([ch[x] for x in f])
             if m is Segment or m is YOLOESegment:
@@ -1770,7 +1781,7 @@ def parse_model(d, ch, verbose=True):
             args = [*args[1:]]
         elif m is CARAFE:
             c2 = ch[f]
-            args = [c2,*args]
+            args = [c2, *args]
         else:
             c2 = ch[f]
 

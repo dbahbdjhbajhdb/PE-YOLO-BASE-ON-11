@@ -1,6 +1,8 @@
+import os
+
 import cv2
 import numpy as np
-import os
+
 from ultralytics import YOLO
 
 # ================= 🔧 配置区域 (请修改这里) =================
@@ -9,10 +11,10 @@ from ultralytics import YOLO
 IMG_PATH = r"C:\date\Visdrone2019\images\test2019\0000087_00299_d_0000002.jpg"
 
 # 2. 基线模型路径 (Baseline)
-MODEL_A_PATH = r'C:\ultralytics-main\runs\detect\yolo11n-visdrone2019-200\weights\best.pt'
+MODEL_A_PATH = r"C:\ultralytics-main\runs\detect\yolo11n-visdrone2019-200\weights\best.pt"
 
 # 3. 改进模型路径 (Ours)
-MODEL_B_PATH = r'C:\ultralytics-main\runs\detect\best-visdrone-200\weights\best.pt'
+MODEL_B_PATH = r"C:\ultralytics-main\runs\detect\best-visdrone-200\weights\best.pt"
 
 # 4. 输出文件夹 (默认存当前目录)
 OUTPUT_DIR = r"C:\visdrone_result_images"
@@ -24,8 +26,9 @@ LINE_WIDTH = 2  # 框的粗细 (VisDrone 建议 1 或 2)
 
 # =======================================================
 
+
 def imread_safe(path):
-    """支持中文路径读取"""
+    """支持中文路径读取."""
     try:
         img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), -1)
         return img
@@ -35,9 +38,9 @@ def imread_safe(path):
 
 
 def imwrite_safe(path, img):
-    """支持中文路径保存"""
+    """支持中文路径保存."""
     try:
-        cv2.imencode('.jpg', img)[1].tofile(path)
+        cv2.imencode(".jpg", img)[1].tofile(path)
         print(f"✅ 已保存: {path}")
     except Exception as e:
         print(f"❌ 保存失败: {e}")
@@ -55,7 +58,8 @@ def run_separate_generation():
     # 1. 读取原图
     print(f"📖 读取图片: {os.path.basename(IMG_PATH)}")
     origin_img = imread_safe(IMG_PATH)
-    if origin_img is None: return
+    if origin_img is None:
+        return
 
     # -------------------------------------------------
     # 2. 生成基线结果 (Baseline)
@@ -92,5 +96,5 @@ def run_separate_generation():
     print("\n🎉 全部完成！去看看这两个文件吧。")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_separate_generation()

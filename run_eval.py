@@ -1,7 +1,8 @@
+import glob
 import json
 import os
+
 import cv2
-import glob
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from tqdm import tqdm
@@ -17,29 +18,41 @@ VAL_LABEL_DIR = r"C:\date\Visdrone2019\labels\val2019"
 
 # 3. YOLO 跑出来的预测结果 (predictions.json)
 #    请确保这个文件存在！(检查一下 val3 是不是最新的)
-PRED_JSON = r'C:\ultralytics-main\runs\detect\val3\predictions.json'
+PRED_JSON = r"C:\ultralytics-main\runs\detect\val3\predictions.json"
 
 
 # ===============================================
 
-def generate_gt_json(img_dir, label_dir, save_name='visdrone_gt.json'):
+
+def generate_gt_json(img_dir, label_dir, save_name="visdrone_gt.json"):
     print(f"正在从 {label_dir} 生成真值 JSON...")
     dataset = {"images": [], "annotations": [], "categories": []}
 
     # 定义类别 (VisDrone 默认 10 类)
-    categories = ["pedestrian", "people", "bicycle", "car", "van",
-                  "truck", "tricycle", "awning-tricycle", "bus", "motor"]
+    categories = [
+        "pedestrian",
+        "people",
+        "bicycle",
+        "car",
+        "van",
+        "truck",
+        "tricycle",
+        "awning-tricycle",
+        "bus",
+        "motor",
+    ]
     for i, name in enumerate(categories):
-        dataset['categories'].append({"id": i, "name": name, "supercategory": "object"})
+        dataset["categories"].append({"id": i, "name": name, "supercategory": "object"})
 
     # 扫描所有图片
-    img_paths = glob.glob(os.path.join(img_dir, '*.jpg')) + glob.glob(os.path.join(img_dir, '*.png'))
+    img_paths = glob.glob(os.path.join(img_dir, "*.jpg")) + glob.glob(os.path.join(img_dir, "*.png"))
 
     ann_id = 0
     for img_path in tqdm(img_paths):
         # 读取图片信息
         img = cv2.imread(img_path)
-        if img is None: continue
+        if img is None:
+            continue
         h, w = img.shape[:2]
         file_name = os.path.basename(img_path)
         # image_id 使用文件名中的数字 (去掉后缀)
@@ -50,22 +63,25 @@ def generate_gt_json(img_dir, label_dir, save_name='visdrone_gt.json'):
 
         img_id = os.path.splitext(file_name)[0]  # ID 是字符串 "00003"
 
-        dataset['images'].append({
-            "id": img_id,  # 保持字符串 ID，这就不用担心不匹配了
-            "width": w,
-            "height": h,
-            "file_name": file_name
-        })
+        dataset["images"].append(
+            {
+                "id": img_id,  # 保持字符串 ID，这就不用担心不匹配了
+                "width": w,
+                "height": h,
+                "file_name": file_name,
+            }
+        )
 
         # 读取对应标签
-        txt_name = os.path.splitext(file_name)[0] + '.txt'
+        txt_name = os.path.splitext(file_name)[0] + ".txt"
         txt_path = os.path.join(label_dir, txt_name)
 
         if os.path.exists(txt_path):
-            with open(txt_path, 'r') as f:
+            with open(txt_path) as f:
                 for line in f:
                     parts = line.strip().split()
-                    if len(parts) < 5: continue
+                    if len(parts) < 5:
+                        continue
                     cls_id = int(parts[0])
                     # YOLO格式: x_center y_center w h (归一化)
                     cx, cy, bw, bh = map(float, parts[1:5])
@@ -76,17 +92,19 @@ def generate_gt_json(img_dir, label_dir, save_name='visdrone_gt.json'):
                     abs_x = (cx * w) - (abs_w / 2)
                     abs_y = (cy * h) - (abs_h / 2)
 
-                    dataset['annotations'].append({
-                        "id": ann_id,
-                        "image_id": img_id,
-                        "category_id": cls_id,
-                        "bbox": [abs_x, abs_y, abs_w, abs_h],
-                        "area": abs_w * abs_h,
-                        "iscrowd": 0
-                    })
+                    dataset["annotations"].append(
+                        {
+                            "id": ann_id,
+                            "image_id": img_id,
+                            "category_id": cls_id,
+                            "bbox": [abs_x, abs_y, abs_w, abs_h],
+                            "area": abs_w * abs_h,
+                            "iscrowd": 0,
+                        }
+                    )
                     ann_id += 1
 
-    with open(save_name, 'w') as f:
+    with open(save_name, "w") as f:
         json.dump(dataset, f)
     print(f"真值文件已生成: {save_name}")
     return save_name
@@ -94,7 +112,7 @@ def generate_gt_json(img_dir, label_dir, save_name='visdrone_gt.json'):
 
 def main():
     # 1. 如果没有真值 JSON，先生成一个
-    gt_json = 'visdrone_gt.json'
+    gt_json = "visdrone_gt.json"
     if not os.path.exists(gt_json):
         generate_gt_json(VAL_IMG_DIR, VAL_LABEL_DIR, gt_json)
 
@@ -109,7 +127,7 @@ def main():
         print(f"错误: 无法加载预测文件。原因: {e}")
         return
 
-    cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
+    cocoEval = COCOeval(cocoGt, cocoDt, "bbox")
     cocoEval.evaluate()
     cocoEval.accumulate()
     cocoEval.summarize()
@@ -117,5 +135,5 @@ def main():
     print("\n请查看上面表格中的 'area= small' 行！")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

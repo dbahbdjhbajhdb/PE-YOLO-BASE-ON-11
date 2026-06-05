@@ -1,21 +1,22 @@
 from collections import defaultdict
-from ultralytics import YOLO
+
 import torch
 
+from ultralytics import YOLO
 
 # =========================
 # 1. 基本配置
 # =========================
 
-WEIGHTS = "C:/ultralytics-main/runs/detect/nassnet+ce_head-visdrone-200/weights/best.pt"          # 你的模型权重，也可以换成 runs/detect/train/weights/best.pt
-DATA = "VisDrone.yaml"          # 你的数据集配置文件
+WEIGHTS = "C:/ultralytics-main/runs/detect/nassnet+ce_head-visdrone-200/weights/best.pt"  # 你的模型权重，也可以换成 runs/detect/train/weights/best.pt
+DATA = "VisDrone.yaml"  # 你的数据集配置文件
 IMGSZ = 640
 BATCH = 2
 
 # 想查看哪些层
 # 例如 [2, 4, 6] 表示只看第 2、4、6 层
 # None 表示查看所有 YOLO11 顶层模块
-TARGET_LAYER_IDS = [1,3]
+TARGET_LAYER_IDS = [1, 3]
 
 # 每隔多少个 batch 打印一次
 PRINT_EVERY = 1
@@ -25,11 +26,9 @@ PRINT_EVERY = 1
 # 2. 递归提取输入中的 tensor
 # =========================
 
+
 def iter_tensors(x):
-    """
-    YOLO 中有些模块的输入可能是 tensor，
-    有些可能是 list/tuple，例如 Concat 模块。
-    这个函数用于把其中的 tensor 都取出来。
+    """YOLO 中有些模块的输入可能是 tensor， 有些可能是 list/tuple，例如 Concat 模块。 这个函数用于把其中的 tensor 都取出来。.
     """
     if torch.is_tensor(x):
         yield x
@@ -45,12 +44,10 @@ def iter_tensors(x):
 # 3. 注册 hook：查看传给前一层的梯度
 # =========================
 
-def on_train_start(trainer):
-    """
-    训练开始时执行。
-    此时 Ultralytics 已经构建好了真正用于训练的 PyTorch 模型。
-    """
 
+def on_train_start(trainer):
+    """训练开始时执行。 此时 Ultralytics 已经构建好了真正用于训练的 PyTorch 模型。.
+    """
     net = trainer.model
 
     net._grad_input_norms = defaultdict(list)
@@ -63,7 +60,6 @@ def on_train_start(trainer):
     print("===============================================\n")
 
     for i, module in enumerate(net.model):
-
         if TARGET_LAYER_IDS is not None and i not in TARGET_LAYER_IDS:
             continue
 
@@ -71,13 +67,9 @@ def on_train_start(trainer):
 
         def make_forward_hook(name):
             def forward_hook(module, inputs, output):
+                """Forward 时拿到模块输入 inputs， 然后在输入 tensor 上注册 grad hook。 backward 时，这个 hook 会得到该输入 tensor 的梯度。
+                这个梯度就是当前模块传给前一层的梯度。.
                 """
-                forward 时拿到模块输入 inputs，
-                然后在输入 tensor 上注册 grad hook。
-                backward 时，这个 hook 会得到该输入 tensor 的梯度。
-                这个梯度就是当前模块传给前一层的梯度。
-                """
-
                 input_tensors = list(iter_tensors(inputs))
 
                 for input_id, x in enumerate(input_tensors):
@@ -92,13 +84,15 @@ def on_train_start(trainer):
                         grad_mean = grad.detach().float().abs().mean().item()
                         grad_max = grad.detach().float().abs().max().item()
 
-                        net._grad_input_norms[name].append({
-                            "input_id": input_id,
-                            "shape": tuple(grad.shape),
-                            "norm": grad_norm,
-                            "mean": grad_mean,
-                            "max": grad_max,
-                        })
+                        net._grad_input_norms[name].append(
+                            {
+                                "input_id": input_id,
+                                "shape": tuple(grad.shape),
+                                "norm": grad_norm,
+                                "mean": grad_mean,
+                                "max": grad_max,
+                            }
+                        )
 
                     x.register_hook(save_input_grad)
 
@@ -113,6 +107,7 @@ def on_train_start(trainer):
 # =========================
 # 4. 每个 batch 后打印梯度
 # =========================
+
 
 def on_train_batch_end(trainer):
     net = trainer.model
@@ -153,6 +148,7 @@ def on_train_batch_end(trainer):
 # 5. 训练结束后移除 hook
 # =========================
 
+
 def on_train_end(trainer):
     net = trainer.model
 
@@ -167,7 +163,6 @@ def on_train_end(trainer):
 # =========================
 
 if __name__ == "__main__":
-
     model = YOLO(WEIGHTS)
 
     model.add_callback("on_train_start", on_train_start)
@@ -179,6 +174,6 @@ if __name__ == "__main__":
         epochs=1,
         imgsz=IMGSZ,
         batch=BATCH,
-        amp=False,       # 调试梯度时建议关闭 AMP，否则梯度可能被 GradScaler 放大
+        amp=False,  # 调试梯度时建议关闭 AMP，否则梯度可能被 GradScaler 放大
         workers=0,
     )

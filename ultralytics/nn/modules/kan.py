@@ -1,9 +1,9 @@
 import math
+
 import torch
 import torch.nn as nn
 
 from .conv import Conv, autopad
-
 
 # ============================================================
 # IMPORTANT:
@@ -26,12 +26,7 @@ class DepthwiseFlattenLayer(nn.Module):
 
     def __init__(self, in_chans, embed_dim):
         super().__init__()
-        self.proj = nn.Conv2d(
-            in_chans,
-            embed_dim,
-            kernel_size=1,
-            groups=in_chans
-        )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=1, groups=in_chans)
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
@@ -83,13 +78,7 @@ class FlattenLayer(nn.Module):
 
     def __init__(self, patch_size=7, stride=4, in_chans=3, embed_dim=768):
         super().__init__()
-        self.proj = nn.Conv2d(
-            in_chans,
-            embed_dim,
-            kernel_size=patch_size,
-            stride=stride,
-            padding=patch_size // 2
-        )
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=stride, padding=patch_size // 2)
         self.norm = nn.LayerNorm(embed_dim)
 
         self.apply(self._init_weights)
@@ -117,50 +106,19 @@ class FlattenLayer(nn.Module):
 class KAN_Block(nn.Module):
     """KAN block with KAN layer, depthwise convolution, BN and SiLU activation."""
 
-    def __init__(
-        self,
-        c1,
-        c2,
-        k=3,
-        s=1,
-        p=None,
-        g=1,
-        d=1,
-        act=True,
-        patch_size=1,
-        stride=1
-    ):
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True, patch_size=1, stride=1):
         super().__init__()
 
         self.flatten = DepthwiseFlattenLayer(c1, c2)
 
         # NOTE:
         # KAN must be defined or imported before using this class.
-        self.kanlayer = KAN(
-            [c1, c2],
-            grid_size=4,
-            spline_order=3,
-            scale_noise=0.1
-        )
+        self.kanlayer = KAN([c1, c2], grid_size=4, spline_order=3, scale_noise=0.1)
 
-        self.dwconv = nn.Conv2d(
-            c2,
-            c2,
-            kernel_size=k,
-            stride=s,
-            padding=autopad(k, p, d),
-            groups=g,
-            dilation=d
-        )
+        self.dwconv = nn.Conv2d(c2, c2, kernel_size=k, stride=s, padding=autopad(k, p, d), groups=g, dilation=d)
 
         self.bn = nn.BatchNorm2d(c2)
-        self.act = (
-            nn.SiLU()
-            if act is True
-            else act
-            if isinstance(act, nn.Module)
-            else nn.Identity()
-        )
+        self.act = nn.SiLU() if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def forward(self, x):
         flattened_x, H, W = self.flatten(x)  # [B, N, embed_dim]
@@ -168,12 +126,7 @@ class KAN_Block(nn.Module):
         x = self.kanlayer(flattened_x)  # [B, N, c2]
 
         # [B, N, c2] -> [B, c2, H, W]
-        x = x.transpose(1, 2).contiguous().view(
-            x.shape[0],
-            x.shape[-1],
-            H,
-            W
-        )
+        x = x.transpose(1, 2).contiguous().view(x.shape[0], x.shape[-1], H, W)
 
         x = self.dwconv(x)
         x = self.bn(x)
@@ -185,44 +138,15 @@ class KAN_Block(nn.Module):
 class KAN_Block2(nn.Module):
     """Alternative KAN block using direct pixel-wise flattening."""
 
-    def __init__(
-        self,
-        c1,
-        c2,
-        k=3,
-        s=1,
-        p=None,
-        g=1,
-        d=1,
-        act=True
-    ):
+    def __init__(self, c1, c2, k=3, s=1, p=None, g=1, d=1, act=True):
         super().__init__()
 
-        self.kanlayer = KAN(
-            [c1, c2],
-            grid_size=4,
-            spline_order=3,
-            scale_noise=0.1
-        )
+        self.kanlayer = KAN([c1, c2], grid_size=4, spline_order=3, scale_noise=0.1)
 
-        self.dwconv = nn.Conv2d(
-            c2,
-            c2,
-            kernel_size=k,
-            stride=s,
-            padding=autopad(k, p, d),
-            groups=g,
-            dilation=d
-        )
+        self.dwconv = nn.Conv2d(c2, c2, kernel_size=k, stride=s, padding=autopad(k, p, d), groups=g, dilation=d)
 
         self.bn = nn.BatchNorm2d(c2)
-        self.act = (
-            nn.SiLU()
-            if act is True
-            else act
-            if isinstance(act, nn.Module)
-            else nn.Identity()
-        )
+        self.act = nn.SiLU() if act is True else act if isinstance(act, nn.Module) else nn.Identity()
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -260,16 +184,7 @@ class Bottleneck_KAN_1D(nn.Module):
 class C3_KAN(nn.Module):
     """CSP bottleneck with KAN-enhanced bottleneck blocks."""
 
-    def __init__(
-        self,
-        c1,
-        c2,
-        n=1,
-        shortcut=True,
-        g=1,
-        e=0.5,
-        k=3
-    ):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, k=3):
         super().__init__()
 
         self.c_ = int(c2 * e)
@@ -278,38 +193,16 @@ class C3_KAN(nn.Module):
         self.cv2 = Conv(c1, self.c_, 1, 1)
         self.cv3 = Conv(2 * self.c_, c2, 1)
 
-        self.flatten = FlattenLayer(
-            patch_size=5,
-            stride=1,
-            in_chans=self.c_,
-            embed_dim=self.c_
-        )
+        self.flatten = FlattenLayer(patch_size=5, stride=1, in_chans=self.c_, embed_dim=self.c_)
 
-        self.m = nn.Sequential(
-            *(
-                Bottleneck_KAN_1D(
-                    self.c_,
-                    self.c_,
-                    shortcut,
-                    g,
-                    k=(k, k),
-                    e=1.0
-                )
-                for _ in range(n)
-            )
-        )
+        self.m = nn.Sequential(*(Bottleneck_KAN_1D(self.c_, self.c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n)))
 
     def forward(self, x):
         y1 = self.cv1(x)
 
         flattened_y1, H, W = self.flatten(y1)
 
-        y1 = flattened_y1.transpose(1, 2).contiguous().view(
-            y1.shape[0],
-            self.c_,
-            H,
-            W
-        )
+        y1 = flattened_y1.transpose(1, 2).contiguous().view(y1.shape[0], self.c_, H, W)
 
         y1 = self.m(y1)
 
@@ -321,15 +214,7 @@ class C3_KAN(nn.Module):
 class C2f_KAN_1D(nn.Module):
     """C2f module with KAN-enhanced bottleneck blocks."""
 
-    def __init__(
-        self,
-        c1,
-        c2,
-        n=1,
-        shortcut=False,
-        g=1,
-        e=0.5
-    ):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         super().__init__()
 
         self.c = int(c2 * e)
@@ -337,17 +222,7 @@ class C2f_KAN_1D(nn.Module):
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
 
-        self.m = nn.ModuleList(
-            Bottleneck_KAN_1D(
-                self.c,
-                self.c,
-                shortcut,
-                g,
-                k=(3, 3),
-                e=1.0
-            )
-            for _ in range(n)
-        )
+        self.m = nn.ModuleList(Bottleneck_KAN_1D(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
 
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, dim=1))
@@ -364,53 +239,25 @@ class C2f_KAN_1D(nn.Module):
 class C2f_KAN_1D2(nn.Module):
     """C2f module with flattening before KAN bottleneck blocks."""
 
-    def __init__(
-        self,
-        c1,
-        c2,
-        n=1,
-        shortcut=False,
-        g=1,
-        e=0.5
-    ):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         super().__init__()
 
         self.c = int(c2 * e)
 
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
 
-        self.flatten = FlattenLayer(
-            patch_size=7,
-            stride=1,
-            in_chans=self.c,
-            embed_dim=self.c
-        )
+        self.flatten = FlattenLayer(patch_size=7, stride=1, in_chans=self.c, embed_dim=self.c)
 
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
 
-        self.m = nn.ModuleList(
-            Bottleneck_KAN_1D(
-                self.c,
-                self.c,
-                shortcut,
-                g,
-                k=(3, 3),
-                e=1.0
-            )
-            for _ in range(n)
-        )
+        self.m = nn.ModuleList(Bottleneck_KAN_1D(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
 
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, dim=1))
 
         flattened_y, H, W = self.flatten(y[-1])
 
-        x = flattened_y.transpose(1, 2).contiguous().view(
-            y[-1].shape[0],
-            self.c,
-            H,
-            W
-        )
+        x = flattened_y.transpose(1, 2).contiguous().view(y[-1].shape[0], self.c, H, W)
 
         for m in self.m:
             x = m(x)
@@ -423,52 +270,25 @@ class C2f_KAN_1D2(nn.Module):
 class C2f_KAN(nn.Module):
     """C2f module using nested C3_KAN blocks."""
 
-    def __init__(
-        self,
-        c1,
-        c2,
-        n=1,
-        shortcut=False,
-        g=1,
-        e=0.5
-    ):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         super().__init__()
 
         self.c = int(c2 * e)
 
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
 
-        self.flatten = FlattenLayer(
-            patch_size=5,
-            stride=1,
-            in_chans=self.c,
-            embed_dim=self.c
-        )
+        self.flatten = FlattenLayer(patch_size=5, stride=1, in_chans=self.c, embed_dim=self.c)
 
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
 
-        self.m = nn.ModuleList(
-            C3_KAN(
-                self.c,
-                self.c,
-                n=2,
-                shortcut=shortcut,
-                g=g
-            )
-            for _ in range(n)
-        )
+        self.m = nn.ModuleList(C3_KAN(self.c, self.c, n=2, shortcut=shortcut, g=g) for _ in range(n))
 
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, dim=1))
 
         flattened_y, H, W = self.flatten(y[-1])
 
-        x = flattened_y.transpose(1, 2).contiguous().view(
-            y[-1].shape[0],
-            self.c,
-            H,
-            W
-        )
+        x = flattened_y.transpose(1, 2).contiguous().view(y[-1].shape[0], self.c, H, W)
 
         for m in self.m:
             x = m(x)

@@ -11,6 +11,7 @@ import torch.nn as nn
 
 __all__ = (
     "CBAM",
+    "RHDWT",
     "ChannelAttention",
     "Concat",
     "Conv",
@@ -20,7 +21,6 @@ __all__ = (
     "DWConvTranspose2d",
     "Focus",
     "GhostConv",
-    "RHDWT",
     "Index",
     "LightConv",
     "RepConv",
@@ -91,9 +91,8 @@ class Conv(nn.Module):
 
 
 class Conv1x1_Equal(nn.Module):
-    """
-    1x1 卷积模块，输入通道 = 输出通道
-    """
+    """1x1 卷积模块，输入通道 = 输出通道."""
+
     def __init__(self, c, act=True):
         super().__init__()
         self.conv = nn.Conv2d(c, c, 1, 1, 0, bias=False)
@@ -684,20 +683,17 @@ class Index(nn.Module):
         return x[self.index]
 
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class HaarDWT(nn.Module):
-    """
-    Haar Discrete Wavelet Transform (HDWT) Layer
-    论文对应: Section III-A & III-C, Eq. (2)-(3)
-    功能: 将输入特征分解为 LL, LH, HL, HH 四个子带并拼接
+    """Haar Discrete Wavelet Transform (HDWT) Layer 论文对应: Section III-A & III-C, Eq. (2)-(3) 功能: 将输入特征分解为 LL, LH, HL, HH
+    四个子带并拼接.
     """
 
     def __init__(self, in_channels):
-        super(HaarDWT, self).__init__()
+        super().__init__()
         self.in_channels = in_channels
 
         # 定义 Haar 小波核 (根据论文 Eq. 3)
@@ -715,7 +711,7 @@ class HaarDWT(nn.Module):
 
         # 扩展到所有输入通道: shape (4*in_channels, 1, 2, 2)
         # 使用 groups=in_channels 实现深度可分离卷积的效果，每个通道独立进行DWT
-        self.register_buffer('filters', filters.repeat(in_channels, 1, 1, 1))
+        self.register_buffer("filters", filters.repeat(in_channels, 1, 1, 1))
 
     def forward(self, x):
         # 使用 stride=2 进行下采样，实现 DWT 操作 [cite: 219]
@@ -725,16 +721,12 @@ class HaarDWT(nn.Module):
 
 
 class RHDWT(nn.Module):
-    """
-    Residual Haar Discrete Wavelet Transform (RHDWT)
-    论文对应: Section III-C, Fig. 3(b), Eq. (9)
-    结构:
-      1. 模型驱动分支: HDWT -> Concatenate -> Conv3x3 -> LeakyReLU
-      2. 残差分支: Conv3x3 (stride=2)
+    """Residual Haar Discrete Wavelet Transform (RHDWT) 论文对应: Section III-C, Fig. 3(b), Eq. (9) 结构: 1. 模型驱动分支: HDWT ->
+    Concatenate -> Conv3x3 -> LeakyReLU 2. 残差分支: Conv3x3 (stride=2).
     """
 
     def __init__(self, in_channels, out_channels):
-        super(RHDWT, self).__init__()
+        super().__init__()
 
         # --- 分支 1: 模型驱动分支 (Model-driven branch) ---
         # 1. Haar DWT: 通道数变为 4倍 (LL, LH, HL, HH) [cite: 223]
@@ -745,7 +737,7 @@ class RHDWT(nn.Module):
         self.main_conv = nn.Sequential(
             nn.Conv2d(in_channels * 4, out_channels, kernel_size=3, padding=1, bias=False),
             # 论文中提到使用 LeakyReLU [cite: 293, 301]
-            nn.LeakyReLU(negative_slope=0.2, inplace=True)
+            nn.LeakyReLU(negative_slope=0.2, inplace=True),
         )
 
         # --- 分支 2: 残差分支 (Residual branch) ---

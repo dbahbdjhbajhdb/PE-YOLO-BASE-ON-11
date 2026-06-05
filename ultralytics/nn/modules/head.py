@@ -20,12 +20,19 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-
-
-__all__ = "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect","CE_Head","R3Head"
-
-
-
+__all__ = (
+    "OBB",
+    "CE_Head",
+    "Classify",
+    "Detect",
+    "Pose",
+    "R3Head",
+    "RTDETRDecoder",
+    "Segment",
+    "YOLOEDetect",
+    "YOLOESegment",
+    "v10Detect",
+)
 
 
 class Detect(nn.Module):
@@ -216,8 +223,9 @@ class Detect(nn.Module):
         i = torch.arange(batch_size)[..., None]  # batch indices
         return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
 
+
 class CE_Head(Detect):
-    """自定义 YOLO11 检测头，继承 Detect，保证 stride/anchor 等逻辑正确。"""
+    """自定义 YOLO11 检测头，继承 Detect，保证 stride/anchor 等逻辑正确。."""
 
     dynamic = False
     export = False
@@ -243,50 +251,54 @@ class CE_Head(Detect):
             nn.Sequential(
                 Conv(c2, c2, 5, g=c2, d=2),
                 Conv(c2, c2, 3, g=c2, d=1),
-            ) for _ in ch
+            )
+            for _ in ch
         )
         self.cv3_ = nn.ModuleList(
             nn.Sequential(
                 Conv(c3, c3, 5, g=c3, d=2),
                 Conv(c3, c3, 3, g=c3, d=1),
-            ) for _ in ch
+            )
+            for _ in ch
         )
 
         # 4) 主分支：从各层特征图到 bbox / cls 输出
         self.cv2 = nn.ModuleList(
             nn.Sequential(
-                Conv(x, c2, 3),           # 0
-                Conv(c2, c2, 3),          # 1
+                Conv(x, c2, 3),  # 0
+                Conv(c2, c2, 3),  # 1
                 nn.Conv2d(c2, 4 * self.reg_max, 1),  # 2 -> bbox logits
-            ) for x in ch
+            )
+            for x in ch
         )
         self.cv3 = nn.ModuleList(
             nn.Sequential(
-                Conv(x, c3, 3),           # 0
-                Conv(c3, c3, 3),          # 1
-                nn.Conv2d(c3, self.nc, 1),          # 2 -> cls logits
-            ) for x in ch
+                Conv(x, c3, 3),  # 0
+                Conv(c3, c3, 3),  # 1
+                nn.Conv2d(c3, self.nc, 1),  # 2 -> cls logits
+            )
+            for x in ch
         )
 
     def forward(self, x):
-        """训练时返回多尺度特征，推理时返回 (y, x) 或 y。"""
+        """训练时返回多尺度特征，推理时返回 (y, x) 或 y。."""
         # --- 多尺度融合 + 输出 ---
         for i in range(self.nl):
             xi = x[i]
 
             # 回归分支
-            r0 = self.cv2[i][0](xi)          # Conv(x, c2, 3)
-            r_res = self.cv2_[i](r0) + r0    # 深度可分卷积残差
-            r1 = self.cv2[i][1](r_res)       # Conv(c2, c2, 3)
-            r  = self.cv2[i][2](r1)          # 1x1 -> 4 * reg_max
+            r0 = self.cv2[i][0](xi)  # Conv(x, c2, 3)
+            r_res = self.cv2_[i](r0) + r0  # 深度可分卷积残差
+            r1 = self.cv2[i][1](r_res)  # Conv(c2, c2, 3)
+            r = self.cv2[i][2](r1)  # 1x1 -> 4 * reg_max
 
             # 分类分支
             c0 = self.cv3[i][0](xi)
             c_res = self.cv3_[i](c0) + c0
             c1 = self.cv3[i][1](c_res)
-            c  = self.cv3[i][2](c1)          # 1x1 -> nc
+            c = self.cv3[i][2](c1)  # 1x1 -> nc
 
-            x[i] = torch.cat((r, c), 1)      # [B, 4*reg_max+nc, H, W]
+            x[i] = torch.cat((r, c), 1)  # [B, 4*reg_max+nc, H, W]
 
         # ---- 训练路径：和原 Detect 一样，直接返回 list[x2,x3,x4] ----
         if self.training:
@@ -318,16 +330,16 @@ class CE_Head(Detect):
         return y if self.export else (y, x)
 
     def decode_bboxes(self, bboxes, anchors):
-        """Decode bounding boxes（保持和你之前一样的调用方式）"""
+        """Decode bounding boxes（保持和你之前一样的调用方式）."""
         return dist2bbox(bboxes, anchors, xywh=True, dim=1)
 
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 
 class R3Head(nn.Module):
-    """R³-Head 升级版：Residual routing + coarse→fine + 跨尺度 residual + 质量感知分类"""
+    """R³-Head 升级版：Residual routing + coarse→fine + 跨尺度 residual + 质量感知分类."""
 
     dynamic = False
     export = False
@@ -346,56 +358,64 @@ class R3Head(nn.Module):
         self.strides = self.stride
 
         # 主卷积尺寸
-        c2 = max(16, ch[0]//4, self.reg_max*4)
+        c2 = max(16, ch[0] // 4, self.reg_max * 4)
         c3 = max(ch[0], min(self.nc, 100))
 
         # Residual routing experts
-        self.cv2_ = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(c2, c2, 3, padding=1, groups=c2),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(c2, c2, 3, padding=1, groups=c2),
-                nn.ReLU(inplace=True)
-            ) for _ in ch
-        ])
-        self.cv3_ = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(c3, c3, 3, padding=1, groups=c3),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(c3, c3, 3, padding=1, groups=c3),
-                nn.ReLU(inplace=True)
-            ) for _ in ch
-        ])
+        self.cv2_ = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(c2, c2, 3, padding=1, groups=c2),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(c2, c2, 3, padding=1, groups=c2),
+                    nn.ReLU(inplace=True),
+                )
+                for _ in ch
+            ]
+        )
+        self.cv3_ = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(c3, c3, 3, padding=1, groups=c3),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(c3, c3, 3, padding=1, groups=c3),
+                    nn.ReLU(inplace=True),
+                )
+                for _ in ch
+            ]
+        )
 
         # 主分支卷积
-        self.cv2 = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(x, c2, 3, padding=1),
-                nn.Conv2d(c2, c2, 3, padding=1),
-                nn.Conv2d(c2, 4*self.reg_max, 1)
-            ) for x in ch
-        ])
-        self.cv3 = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(x, c3, 3, padding=1),
-                nn.Conv2d(c3, c3, 3, padding=1),
-                nn.Conv2d(c3, self.nc, 1)
-            ) for x in ch
-        ])
+        self.cv2 = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(x, c2, 3, padding=1), nn.Conv2d(c2, c2, 3, padding=1), nn.Conv2d(c2, 4 * self.reg_max, 1)
+                )
+                for x in ch
+            ]
+        )
+        self.cv3 = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(x, c3, 3, padding=1), nn.Conv2d(c3, c3, 3, padding=1), nn.Conv2d(c3, self.nc, 1)
+                )
+                for x in ch
+            ]
+        )
 
         # DFL 层
-        self.dfl = nn.Identity() if self.reg_max <= 1 else nn.Conv2d(4*self.reg_max, 4*self.reg_max, 1)
+        self.dfl = nn.Identity() if self.reg_max <= 1 else nn.Conv2d(4 * self.reg_max, 4 * self.reg_max, 1)
 
         # Residual refinement (coarse→fine)
-        self.res_refine = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(4*self.reg_max, 4*self.reg_max, 3, padding=1),
-                nn.ReLU(inplace=True)
-            ) for _ in ch
-        ])
+        self.res_refine = nn.ModuleList(
+            [
+                nn.Sequential(nn.Conv2d(4 * self.reg_max, 4 * self.reg_max, 3, padding=1), nn.ReLU(inplace=True))
+                for _ in ch
+            ]
+        )
 
         # 跨尺度 residual 融合权重
-        self.cross_scale_weights = nn.Parameter(torch.ones(self.nl, self.nl)/self.nl)
+        self.cross_scale_weights = nn.Parameter(torch.ones(self.nl, self.nl) / self.nl)
 
     def forward(self, x):
         # 回归 + 分类 + residual routing
@@ -423,10 +443,10 @@ class R3Head(nn.Module):
             hi, wi = x[i].shape[2], x[i].shape[3]
             for j in range(self.nl):
                 if x[j].shape[2] != hi or x[j].shape[3] != wi:
-                    xj_resized = F.interpolate(x[j], size=(hi, wi), mode='bilinear', align_corners=False)
+                    xj_resized = F.interpolate(x[j], size=(hi, wi), mode="bilinear", align_corners=False)
                 else:
                     xj_resized = x[j]
-                tmp += self.cross_scale_weights[i,j] * xj_resized
+                tmp += self.cross_scale_weights[i, j] * xj_resized
             x[i] = tmp
 
         if self.training:
@@ -437,10 +457,10 @@ class R3Head(nn.Module):
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
 
         if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (t.transpose(0,1) for t in make_anchors(x, self.stride, 0.5))
+            self.anchors, self.strides = (t.transpose(0, 1) for t in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
-        box, cls = x_cat.split((self.reg_max*4, self.nc), 1)
+        box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         # 使用 head.py 内标准 decode_bboxes
         dbox = self.decode_bboxes(box, self.anchors.unsqueeze(0)) * self.strides
 
@@ -451,9 +471,9 @@ class R3Head(nn.Module):
         # 调用 head.py 中标准 dist2bbox 函数
         return dist2bbox(bboxes, anchors, xywh=True, dim=1)
 
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # 默认这些在你的工程里已经有
 # from ultralytics.nn.modules import Detect, DFL, Conv
@@ -461,10 +481,9 @@ import torch.nn.functional as F
 
 
 class StripContext(nn.Module):
+    """轻量上下文混合器： 用 1x5 + 5x1 条带卷积补充长程上下文.
     """
-    轻量上下文混合器：
-    用 1x5 + 5x1 条带卷积补充长程上下文
-    """
+
     def __init__(self, c):
         super().__init__()
         self.dw_h = nn.Conv2d(c, c, kernel_size=(1, 5), padding=(0, 2), groups=c, bias=False)
@@ -480,10 +499,9 @@ class StripContext(nn.Module):
 
 
 class ScaleRouteFusion(nn.Module):
+    """跨层尺度路由： 当前层 + 上一层 + 下一层 动态加权融合.
     """
-    跨层尺度路由：
-    当前层 + 上一层 + 下一层 动态加权融合
-    """
+
     def __init__(self, c):
         super().__init__()
         hidden = max(c // 4, 16)
@@ -505,13 +523,11 @@ class ScaleRouteFusion(nn.Module):
         else:
             nxt = F.interpolate(nxt, size=(h, w), mode="nearest")
 
-        s = torch.cat([
-            F.adaptive_avg_pool2d(cur, 1),
-            F.adaptive_avg_pool2d(prev, 1),
-            F.adaptive_avg_pool2d(nxt, 1)
-        ], dim=1)
+        s = torch.cat(
+            [F.adaptive_avg_pool2d(cur, 1), F.adaptive_avg_pool2d(prev, 1), F.adaptive_avg_pool2d(nxt, 1)], dim=1
+        )
 
-        wgt = self.fc2(self.act(self.fc1(s)))   # [B, 3C, 1, 1]
+        wgt = self.fc2(self.act(self.fc1(s)))  # [B, 3C, 1, 1]
         wgt = wgt.view(b, 3, c, 1, 1)
         wgt = torch.softmax(wgt, dim=1)
 
@@ -520,10 +536,9 @@ class ScaleRouteFusion(nn.Module):
 
 
 class TaskAlignInteract(nn.Module):
+    """任务交互对齐块： 共享表征 -> cls/reg 初始特征 -> 双向交互 -> 回归先验调制.
     """
-    任务交互对齐块：
-    共享表征 -> cls/reg 初始特征 -> 双向交互 -> 回归先验调制
-    """
+
     def __init__(self, c_shared, c_reg, c_cls):
         super().__init__()
 
@@ -567,9 +582,7 @@ class TaskAlignInteract(nn.Module):
 
 
 class RDC_Head(Detect):
-    """
-    保留原类名，避免额外注册修改
-    结构为：尺度路由 + 任务对齐 + 回归先验调制
+    """保留原类名，避免额外注册修改 结构为：尺度路由 + 任务对齐 + 回归先验调制.
     """
 
     dynamic = False
@@ -598,17 +611,11 @@ class RDC_Head(Detect):
         self.route = nn.ModuleList(ScaleRouteFusion(c_shared) for _ in ch)
 
         # 任务交互对齐
-        self.task = nn.ModuleList(
-            TaskAlignInteract(c_shared, c_reg, c_cls) for _ in ch
-        )
+        self.task = nn.ModuleList(TaskAlignInteract(c_shared, c_reg, c_cls) for _ in ch)
 
         # 最终预测
-        self.bbox_pred = nn.ModuleList(
-            nn.Conv2d(c_reg, 4 * self.reg_max, 1) for _ in ch
-        )
-        self.cls_pred = nn.ModuleList(
-            nn.Conv2d(c_cls, self.nc, 1) for _ in ch
-        )
+        self.bbox_pred = nn.ModuleList(nn.Conv2d(c_reg, 4 * self.reg_max, 1) for _ in ch)
+        self.cls_pred = nn.ModuleList(nn.Conv2d(c_cls, self.nc, 1) for _ in ch)
 
     def forward(self, x):
         feats = [self.stem[i](x[i]) for i in range(self.nl)]
@@ -632,39 +639,28 @@ class RDC_Head(Detect):
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
 
         if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (
-                t.transpose(0, 1) for t in make_anchors(x, self.stride, 0.5)
-            )
+            self.anchors, self.strides = (t.transpose(0, 1) for t in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:
             box = x_cat[:, : self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
 
         if self.export and self.format in {"tflite", "edgetpu"}:
             grid_h, grid_w = shape[2], shape[3]
-            grid_size = torch.tensor(
-                [grid_w, grid_h, grid_w, grid_h], device=box.device
-            ).reshape(1, 4, 1)
+            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
             norm = self.strides / (self.stride[0] * grid_size)
-            dbox = self.decode_bboxes(
-                self.dfl(box) * norm,
-                self.anchors.unsqueeze(0) * norm[:, :2]
-            )
+            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
         else:
-            dbox = self.decode_bboxes(
-                self.dfl(box),
-                self.anchors.unsqueeze(0)
-            ) * self.strides
+            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
 
         y = torch.cat((dbox, cls.sigmoid()), 1)
         return y if self.export else (y, x)
 
     def decode_bboxes(self, bboxes, anchors):
         return dist2bbox(bboxes, anchors, xywh=True, dim=1)
-
 
 
 class Segment(Detect):
@@ -1637,13 +1633,11 @@ class v10Detect(Detect):
         self.cv2 = self.cv3 = nn.ModuleList([nn.Identity()] * self.nl)
 
 
-import math
 import torch
 import torch.nn as nn
-from torchvision.ops import DeformConv2d
+
 from ultralytics.nn.modules.block import DFL
 from ultralytics.nn.modules.conv import Conv, DWConv
-from ultralytics.utils.tal import dist2bbox, make_anchors
 from ultralytics.nn.modules.head import Detect
 
 
@@ -1695,6 +1689,7 @@ class CFDH_SingleHead(nn.Module):
 
         return x_reg_geo, x_cls_geo
 
+
 # --- 2. 终极修正版 Detect_CFDH ---
 class Detect_CFDH(Detect):
     dynamic = False
@@ -1718,22 +1713,16 @@ class Detect_CFDH(Detect):
         c2 = min(c2, 128)
 
         # CFDH 模块
-        self.cfdh_modules = nn.ModuleList([
-            CFDH_SingleHead(c1=x, c2=c2) for x in ch
-        ])
+        self.cfdh_modules = nn.ModuleList([CFDH_SingleHead(c1=x, c2=c2) for x in ch])
 
         # 投影层 (使用 Sequential 包裹，兼容 YOLO 的列表索引习惯)
-        self.cv2 = nn.ModuleList([
-            nn.Sequential(nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch
-        ])
+        self.cv2 = nn.ModuleList([nn.Sequential(nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch])
 
-        self.cv3 = nn.ModuleList([
-            nn.Sequential(nn.Conv2d(c2, nc, 1)) for _ in ch
-        ])
+        self.cv3 = nn.ModuleList([nn.Sequential(nn.Conv2d(c2, nc, 1)) for _ in ch])
 
     def forward(self, x):
         # 调试打印 (只在第一次运行时打印，确认输入正常)
-        if not hasattr(self, '_debug_printed'):
+        if not hasattr(self, "_debug_printed"):
             print(f"[Debug] Detect_CFDH Input Shapes: {[xi.shape for xi in x]}")
             self._debug_printed = True
 
@@ -1759,7 +1748,7 @@ class Detect_CFDH(Detect):
 
         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:
             box = x_cat[:, : self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
 
@@ -1779,15 +1768,13 @@ class Detect_CFDH(Detect):
 
     # --- 终极安全版 bias_init ---
     def bias_init(self):
-        """
-        这个函数是崩溃的高发区。
-        我们重写它，不假设任何结构，手动安全地初始化。
+        """这个函数是崩溃的高发区。 我们重写它，不假设任何结构，手动安全地初始化。.
         """
         print("[Debug] Running Safe Bias Init...")
         m = self
 
         # 确保 stride 已计算，否则使用默认值 32 防止除零
-        if hasattr(m, 'stride') and isinstance(m.stride, torch.Tensor) and m.stride.numel() > 0:
+        if hasattr(m, "stride") and isinstance(m.stride, torch.Tensor) and m.stride.numel() > 0:
             strides = m.stride.tolist()
         else:
             print("[Warning] Stride not computed yet, using default 32.0 for init.")
@@ -1805,7 +1792,7 @@ class Detect_CFDH(Detect):
             else:
                 conv_box = cv2_module
 
-            if hasattr(conv_box, 'bias') and conv_box.bias is not None:
+            if hasattr(conv_box, "bias") and conv_box.bias is not None:
                 conv_box.bias.data[:] = 1.0
 
             # --- 初始化 Cls 分支 ---
@@ -1816,21 +1803,19 @@ class Detect_CFDH(Detect):
                 conv_cls = cv3_module
 
             s = strides[i] if i < len(strides) else 32.0
-            if s <= 0: s = 32.0  # 双重保险
+            if s <= 0:
+                s = 32.0  # 双重保险
 
-            if hasattr(conv_cls, 'bias') and conv_cls.bias is not None:
-                conv_cls.bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)
+            if hasattr(conv_cls, "bias") and conv_cls.bias is not None:
+                conv_cls.bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)
 
         print("[Debug] Safe Bias Init Completed.")
 
 
 class DeepSupervisionDetect(nn.Module):
-    """
-    输入顺序:
-    [aux_p2, aux_p3, aux_p4, main_p2, main_p3, main_p4]
+    """输入顺序: [aux_p2, aux_p3, aux_p4, main_p2, main_p3, main_p4].
 
-    训练时返回:
-    {"main": main_pred, "aux": aux_pred, "aux_weight": aux_weight}
+    训练时返回: {"main": main_pred, "aux": aux_pred, "aux_weight": aux_weight}
 
     推理时只返回 main_pred
     """

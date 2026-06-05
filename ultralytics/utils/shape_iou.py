@@ -10,8 +10,9 @@ def shape_iou(box1, box2, xywh=True, scale=0, eps=1e-7):
     b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
 
     # Intersection area
-    inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
-            (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+    inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * (
+        torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)
+    ).clamp(0)
 
     # Union Area
     union = w1 * h1 + w2 * h2 - inter + eps
@@ -24,7 +25,7 @@ def shape_iou(box1, box2, xywh=True, scale=0, eps=1e-7):
     hh = 2 * torch.pow(h2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
     cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex width
     ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
-    c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+    c2 = cw**2 + ch**2 + eps  # convex diagonal squared
     center_distance_x = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2) / 4
     center_distance_y = ((b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4
     center_distance = hh * center_distance_x + ww * center_distance_y

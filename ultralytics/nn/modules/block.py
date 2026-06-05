@@ -6,9 +6,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
-from einops import rearrange
+
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
 
@@ -21,7 +22,9 @@ __all__ = (
     "CIB",
     "DFL",
     "ELAN1",
+    "HDRAB",
     "PSA",
+    "RHDWT",
     "SPP",
     "SPPELAN",
     "SPPF",
@@ -41,21 +44,19 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "ContrastiveHead",
+    "DynamicAttention",
     "GhostBottleneck",
     "HGBlock",
     "HGStem",
     "ImagePoolingAttn",
     "Proto",
+    "RFAConv",
     "RepC3",
     "RepNCSPELAN4",
     "RepVGGDW",
     "ResNetLayer",
     "SCDown",
     "TorchVision",
-    "RFAConv",
-    "DynamicAttention",
-    "HDRAB",
-    "RHDWT",
 )
 
 
@@ -244,16 +245,24 @@ class RFAConv(nn.Module):
         # 获取权重的网络结构
         self.get_weight = nn.Sequential(
             nn.AvgPool2d(kernel_size=kernel_size, padding=kernel_size // 2, stride=stride),  # 平均池化层
-            nn.Conv2d(in_channel, in_channel * (kernel_size ** 2), kernel_size=1,
-                      groups=in_channel, bias=False)  # 卷积层，用于生成权重
+            nn.Conv2d(
+                in_channel, in_channel * (kernel_size**2), kernel_size=1, groups=in_channel, bias=False
+            ),  # 卷积层，用于生成权重
         )
 
         # 生成特征的网络结构
         self.generate_feature = nn.Sequential(
-            nn.Conv2d(in_channel, in_channel * (kernel_size ** 2), kernel_size=kernel_size,
-                      padding=kernel_size // 2, stride=stride, groups=in_channel, bias=False),  # 卷积层，用于生成特征
-            nn.BatchNorm2d(in_channel * (kernel_size ** 2)),  # 批归一化层
-            nn.ReLU()  # 激活函数
+            nn.Conv2d(
+                in_channel,
+                in_channel * (kernel_size**2),
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
+                stride=stride,
+                groups=in_channel,
+                bias=False,
+            ),  # 卷积层，用于生成特征
+            nn.BatchNorm2d(in_channel * (kernel_size**2)),  # 批归一化层
+            nn.ReLU(),  # 激活函数
         )
 
         # 最终的卷积层
@@ -264,32 +273,37 @@ class RFAConv(nn.Module):
         weight = self.get_weight(x)  # 生成权重
         h, w = weight.shape[2:]  # 获取权重张量的高度和宽度
         # 对权重进行reshape并应用softmax
-        weighted = weight.view(b, c, self.kernel_size ** 2, h, w).softmax(2)
+        weighted = weight.view(b, c, self.kernel_size**2, h, w).softmax(2)
         # 生成特征并进行reshape
-        feature = self.generate_feature(x).view(b, c, self.kernel_size ** 2, h, w)
+        feature = self.generate_feature(x).view(b, c, self.kernel_size**2, h, w)
         # 对特征和权重进行乘法操作
         weighted_data = feature * weighted
         # 使用einops库对张量进行重排
-        conv_data = rearrange(weighted_data, 'b c (n1 n2) h w -> b c (h n1) (w n2)', n1=self.kernel_size,
-                              n2=self.kernel_size)
+        conv_data = rearrange(
+            weighted_data, "b c (n1 n2) h w -> b c (h n1) (w n2)", n1=self.kernel_size, n2=self.kernel_size
+        )
         # 应用最终的卷积层
         return self.conv(conv_data)
-import torch
-import torch.nn as nn
+
+
 import math
-from einops import rearrange
+
+import torch.nn as nn
 
 try:
     from ultralytics.nn.modules.conv import Conv
 except ImportError:
+
     class Conv(nn.Module):
         def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
             super().__init__()
             self.conv = nn.Conv2d(c1, c2, k, s, p, groups=g, bias=False)
             self.bn = nn.BatchNorm2d(c2)
             self.act = nn.SiLU() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
+
         def forward(self, x):
             return self.act(self.bn(self.conv(x)))
+
 
 class StandardRFAConv(nn.Module):
     def __init__(self, in_channel, out_channel, kernel_size=3, stride=1):
@@ -306,29 +320,34 @@ class StandardRFAConv(nn.Module):
         channels_per_group = 8
         # 确保 groups 能被 in_channel 整除
         g = math.gcd(in_channel, in_channel // channels_per_group)
-        if g == 0: g = 1  # 防止特殊情况
+        if g == 0:
+            g = 1  # 防止特殊情况
 
         self.get_weight = nn.Sequential(
             nn.AvgPool2d(kernel_size=kernel_size, padding=kernel_size // 2, stride=stride),
-
             # ---> 轻量级通道融合 (Grouped Pointwise Conv) <---
             # 参数量 = (C * C) / g
             # 相比全连接 1x1，这里节省了 g 倍的参数
             nn.Conv2d(in_channel, in_channel, kernel_size=1, stride=1, padding=0, groups=g, bias=False),
             nn.BatchNorm2d(in_channel),
             nn.SiLU(),
-
             # 生成权重 (保持 Depthwise 以极致省参数)
-            nn.Conv2d(in_channel, in_channel * (kernel_size ** 2), kernel_size=1,
-                      groups=in_channel, bias=False)
+            nn.Conv2d(in_channel, in_channel * (kernel_size**2), kernel_size=1, groups=in_channel, bias=False),
         )
 
         # 特征生成部分保持不变 (Depthwise)，这是大头，必须省
         self.generate_feature = nn.Sequential(
-            nn.Conv2d(in_channel, in_channel * (kernel_size ** 2), kernel_size=kernel_size,
-                      padding=kernel_size // 2, stride=stride, groups=in_channel, bias=False),
-            nn.BatchNorm2d(in_channel * (kernel_size ** 2)),
-            nn.ReLU()
+            nn.Conv2d(
+                in_channel,
+                in_channel * (kernel_size**2),
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
+                stride=stride,
+                groups=in_channel,
+                bias=False,
+            ),
+            nn.BatchNorm2d(in_channel * (kernel_size**2)),
+            nn.ReLU(),
         )
 
         self.conv = Conv(in_channel, out_channel, k=kernel_size, s=kernel_size, p=0)
@@ -339,41 +358,37 @@ class StandardRFAConv(nn.Module):
         weight = self.get_weight(x)
         h, w = weight.shape[2:]
 
-        weighted = weight.view(b, c, self.kernel_size ** 2, h, w).softmax(2)
-        feature = self.generate_feature(x).view(b, c, self.kernel_size ** 2, h, w)
+        weighted = weight.view(b, c, self.kernel_size**2, h, w).softmax(2)
+        feature = self.generate_feature(x).view(b, c, self.kernel_size**2, h, w)
 
         weighted_data = feature * weighted
 
-        conv_data = rearrange(weighted_data, 'b c (n1 n2) h w -> b c (h n1) (w n2)',
-                              n1=self.kernel_size, n2=self.kernel_size)
+        conv_data = rearrange(
+            weighted_data, "b c (n1 n2) h w -> b c (h n1) (w n2)", n1=self.kernel_size, n2=self.kernel_size
+        )
 
         return self.conv(conv_data)
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import pywt
 import numpy as np
+import pywt
+import torch.nn as nn
 
 
 class RHDWT(nn.Module):
-    """
-    残差离散小波变换下采样模块 (RHDWT)
+    """残差离散小波变换下采样模块 (RHDWT).
 
-    兼容性修复版：
-    允许像 nn.Conv2d 那样传入 kernel_size 参数（会被自动忽略），
-    从而避免因直接替换 Conv2d 导致的 "int object has no attribute lower" 错误。
+    兼容性修复版： 允许像 nn.Conv2d 那样传入 kernel_size 参数（会被自动忽略）， 从而避免因直接替换 Conv2d 导致的 "int object has no attribute lower" 错误。
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size=None, stride=2, wavelet='db2'):
+    def __init__(self, in_channels, out_channels, kernel_size=None, stride=2, wavelet="db2"):
         """
         Args:
             in_channels: 输入通道数
             out_channels: 输出通道数
             kernel_size: (可选) 仅用于兼容 nn.Conv2d 的调用格式，实际不使用，可传 3 或 None
             stride: 步长，默认为 2
-            wavelet: 小波类型，默认为 'db2'
+            wavelet: 小波类型，默认为 'db2'.
         """
         super().__init__()
 
@@ -389,17 +404,14 @@ class RHDWT(nn.Module):
         self.wavelet = wavelet
 
         # 1. 获取小波滤波器并构建 2D 卷积核
-        self.register_buffer('wavelet_filter', self._get_wavelet_filter(wavelet, in_channels))
+        self.register_buffer("wavelet_filter", self._get_wavelet_filter(wavelet, in_channels))
 
         # 2. 残差连接后的特征融合层
         # stride设为1，因为小波变换步骤已经完成了下采样
-        self.res_conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=1,
-            stride=1, padding=0, bias=False
-        )
+        self.res_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
 
     def _get_wavelet_filter(self, wavelet_name, in_channels):
-        """生成兼容 PyTorch Conv2d 的小波核"""
+        """生成兼容 PyTorch Conv2d 的小波核."""
         try:
             w = pywt.Wavelet(wavelet_name)
         except ValueError:
@@ -431,7 +443,7 @@ class RHDWT(nn.Module):
 
         # padding 计算：针对 db2 (len=4), stride=2，padding=1 保持 H/2 输出
         # 如果你换了其他长度的小波，需要调整这里的 padding
-        padding = 1 if self.wavelet == 'db2' else 0
+        padding = 1 if self.wavelet == "db2" else 0
 
         # 1. 小波变换 (使用分组卷积实现 Depthwise)
         dwt_out = F.conv2d(x, self.wavelet_filter, stride=self.stride, padding=padding, groups=C)
@@ -467,12 +479,10 @@ if __name__ == "__main__":
     y1 = model_legacy(x)
     print(f"场景1 (带参3) 输出尺寸: {y1.shape}")  #
 
+
 class DynamicAttention(nn.Module):
-    """
-    DAU-YOLO 核心模块 (防呆修正版)
-    --------------------------------
-    修复: 强制 kernel_size=3，防止 YOLO 解析器将通道数(32/64)误传为核大小，
-          从而引发 "shape invalid for input of size 1089" 错误。
+    """DAU-YOLO 核心模块 (防呆修正版). -------------------------------- 修复: 强制 kernel_size=3，防止 YOLO 解析器将通道数(32/64)误传为核大小， 从而引发
+    "shape invalid for input of size 1089" 错误。.
     """
 
     # 1. 修改 init 签名，增加 *args 吸收多余参数
@@ -502,8 +512,9 @@ class DynamicAttention(nn.Module):
         # 注册基准网格 (FP32)
         base_range = self.kernel_size // 2  # 3//2 = 1
         # 生成范围: -1, 0, 1
-        base_offsets = [[dy, dx] for dy in range(-base_range, base_range + 1) for dx in
-                        range(-base_range, base_range + 1)]
+        base_offsets = [
+            [dy, dx] for dy in range(-base_range, base_range + 1) for dx in range(-base_range, base_range + 1)
+        ]
         self.register_buffer("base_offsets", torch.tensor(base_offsets, dtype=torch.float32), persistent=False)
 
         # === 初始化权重 ===
@@ -515,9 +526,9 @@ class DynamicAttention(nn.Module):
         nn.init.constant_(self.conv_offset.bias, 0.0)
 
         # Mask 初始化: 偏置设为 3.0 (Sigmoid后接近1)，初始开启
-        center_mask_idx = 2 * self.N + (self.N // 2)
+        2 * self.N + (self.N // 2)
         with torch.no_grad():
-            self.conv_offset.bias.data[2 * self.N:] = 3.0
+            self.conv_offset.bias.data[2 * self.N :] = 3.0
 
             # DyReLU 初始化
         nn.init.xavier_normal_(self.fc1.weight)
@@ -527,8 +538,8 @@ class DynamicAttention(nn.Module):
         # Leaky 模式: alpha1=1, alpha2=0.25
         with torch.no_grad():
             bias_init = torch.zeros(self.c1 * 4)
-            bias_init[0:self.c1] = 1.0
-            bias_init[2 * self.c1:3 * self.c1] = 0.25
+            bias_init[0 : self.c1] = 1.0
+            bias_init[2 * self.c1 : 3 * self.c1] = 0.25
             self.fc2.bias = nn.Parameter(bias_init)
 
             # 采样中心点权重设为 1
@@ -545,9 +556,9 @@ class DynamicAttention(nn.Module):
         # 1. 生成偏移 (B, 3N, H, W)
         offset_out = self.conv_offset(x).float()
 
-        offset_x = offset_out[:, 0:self.N]
-        offset_y = offset_out[:, self.N:2 * self.N]
-        mask = offset_out[:, 2 * self.N:3 * self.N].sigmoid()
+        offset_x = offset_out[:, 0 : self.N]
+        offset_y = offset_out[:, self.N : 2 * self.N]
+        mask = offset_out[:, 2 * self.N : 3 * self.N].sigmoid()
 
         # 2. 构建网格
         base_y = torch.arange(H, device=device, dtype=torch.float32).view(1, 1, H, 1)
@@ -566,8 +577,9 @@ class DynamicAttention(nn.Module):
         # 5. 采样
         out_fp32 = torch.zeros_like(x_fp32)
         for n in range(self.N):
-            sampled = F.grid_sample(x_fp32, grid.select(1, n), mode="bilinear", padding_mode="zeros",
-                                    align_corners=False)
+            sampled = F.grid_sample(
+                x_fp32, grid.select(1, n), mode="bilinear", padding_mode="zeros", align_corners=False
+            )
             w_n = self.weight[:, n].view(1, C, 1, 1).float()
             m_n = mask[:, n].unsqueeze(1)
             out_fp32 += sampled * w_n * m_n
@@ -579,17 +591,28 @@ class DynamicAttention(nn.Module):
         theta = self.fc2(F.relu(self.fc1(ctx)))
 
         a1 = theta[:, 0:C].view(B, C, 1, 1)
-        b1 = theta[:, C:2 * C].view(B, C, 1, 1)
-        a2 = theta[:, 2 * C:3 * C].view(B, C, 1, 1)
-        b2 = theta[:, 3 * C:4 * C].view(B, C, 1, 1)
+        b1 = theta[:, C : 2 * C].view(B, C, 1, 1)
+        a2 = theta[:, 2 * C : 3 * C].view(B, C, 1, 1)
+        b2 = theta[:, 3 * C : 4 * C].view(B, C, 1, 1)
 
         return torch.maximum(a1 * out + b1, a2 * out + b2)
 
 
 class RepVGGBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3,
-                 stride=1, padding=1, dilation=1, groups=1, padding_mode='zeros', deploy=False, use_se=False):
-        super(RepVGGBlock, self).__init__()
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        dilation=1,
+        groups=1,
+        padding_mode="zeros",
+        deploy=False,
+        use_se=False,
+    ):
+        super().__init__()
         self.deploy = deploy
         self.groups = groups
         self.in_channels = in_channels
@@ -601,39 +624,64 @@ class RepVGGBlock(nn.Module):
         else:
             self.se = nn.Identity()
         if deploy:
-            self.rbr_reparam = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                                         stride=stride,
-                                         padding=padding, dilation=dilation, groups=groups, bias=True,
-                                         padding_mode=padding_mode)
+            self.rbr_reparam = nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                bias=True,
+                padding_mode=padding_mode,
+            )
 
         else:
-            self.rbr_identity = nn.BatchNorm2d(
-                num_features=in_channels) if out_channels == in_channels and stride == 1 else None
-            self.rbr_dense = conv_bn(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                                     stride=stride, padding=padding, groups=groups)
-            self.rbr_1x1 = conv_bn(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=stride,
-                                   padding=padding_11, groups=groups)
+            self.rbr_identity = (
+                nn.BatchNorm2d(num_features=in_channels) if out_channels == in_channels and stride == 1 else None
+            )
+            self.rbr_dense = conv_bn(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                groups=groups,
+            )
+            self.rbr_1x1 = conv_bn(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=1,
+                stride=stride,
+                padding=padding_11,
+                groups=groups,
+            )
             # print('RepVGG Block, identity = ', self.rbr_identity)
 
     def switch_to_deploy(self):
-        if hasattr(self, 'rbr_1x1'):
+        if hasattr(self, "rbr_1x1"):
             kernel, bias = self.get_equivalent_kernel_bias()
-            self.rbr_reparam = nn.Conv2d(in_channels=self.rbr_dense.conv.in_channels,
-                                         out_channels=self.rbr_dense.conv.out_channels,
-                                         kernel_size=self.rbr_dense.conv.kernel_size, stride=self.rbr_dense.conv.stride,
-                                         padding=self.rbr_dense.conv.padding, dilation=self.rbr_dense.conv.dilation,
-                                         groups=self.rbr_dense.conv.groups, bias=True)
+            self.rbr_reparam = nn.Conv2d(
+                in_channels=self.rbr_dense.conv.in_channels,
+                out_channels=self.rbr_dense.conv.out_channels,
+                kernel_size=self.rbr_dense.conv.kernel_size,
+                stride=self.rbr_dense.conv.stride,
+                padding=self.rbr_dense.conv.padding,
+                dilation=self.rbr_dense.conv.dilation,
+                groups=self.rbr_dense.conv.groups,
+                bias=True,
+            )
             self.rbr_reparam.weight.data = kernel
             self.rbr_reparam.bias.data = bias
             for para in self.parameters():
                 para.detach_()
             self.rbr_dense = self.rbr_reparam
             # self.__delattr__('rbr_dense')
-            self.__delattr__('rbr_1x1')
-            if hasattr(self, 'rbr_identity'):
-                self.__delattr__('rbr_identity')
-            if hasattr(self, 'id_tensor'):
-                self.__delattr__('id_tensor')
+            self.__delattr__("rbr_1x1")
+            if hasattr(self, "rbr_identity"):
+                self.__delattr__("rbr_identity")
+            if hasattr(self, "id_tensor"):
+                self.__delattr__("id_tensor")
             self.deploy = True
 
     def get_equivalent_kernel_bias(self):
@@ -660,7 +708,7 @@ class RepVGGBlock(nn.Module):
             eps = branch.bn.eps
         else:
             assert isinstance(branch, nn.BatchNorm2d)
-            if not hasattr(self, 'id_tensor'):
+            if not hasattr(self, "id_tensor"):
                 input_dim = self.in_channels // self.groups
                 kernel_value = np.zeros((self.in_channels, input_dim, 3, 3), dtype=np.float32)
                 for i in range(self.in_channels):
@@ -679,7 +727,7 @@ class RepVGGBlock(nn.Module):
     def forward(self, inputs):
         if self.deploy:
             return self.nonlinearity(self.rbr_dense(inputs))
-        if hasattr(self, 'rbr_reparam'):
+        if hasattr(self, "rbr_reparam"):
             return self.nonlinearity(self.se(self.rbr_reparam(inputs)))
 
         if self.rbr_identity is None:
@@ -689,13 +737,13 @@ class RepVGGBlock(nn.Module):
         return self.nonlinearity(self.se(self.rbr_dense(inputs) + self.rbr_1x1(inputs) + id_out))
 
 
-
 import torch
 from torch import nn
 
+
 class EMA(nn.Module):
     def __init__(self, channels, c2=None, factor=32):
-        super(EMA, self).__init__()
+        super().__init__()
         self.groups = factor  # 分组数，默认为32
         assert channels // self.groups > 0  # 确保通道数能够被分组数整除
         self.softmax = nn.Softmax(-1)  # 定义 Softmax 层，用于最后一维度的归一化
@@ -703,35 +751,47 @@ class EMA(nn.Module):
         self.pool_h = nn.AdaptiveAvgPool2d((None, 1))  # 自适应平均池化，保留高度维度，将宽度压缩为1
         self.pool_w = nn.AdaptiveAvgPool2d((1, None))  # 自适应平均池化，保留宽度维度，将高度压缩为1
         self.gn = nn.GroupNorm(channels // self.groups, channels // self.groups)  # 分组归一化
-        self.conv1x1 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=1, stride=1, padding=0)  # 1x1卷积
-        self.conv3x3 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=3, stride=1, padding=1)  # 3x3卷积
+        self.conv1x1 = nn.Conv2d(
+            channels // self.groups, channels // self.groups, kernel_size=1, stride=1, padding=0
+        )  # 1x1卷积
+        self.conv3x3 = nn.Conv2d(
+            channels // self.groups, channels // self.groups, kernel_size=3, stride=1, padding=1
+        )  # 3x3卷积
 
     def forward(self, x):
         b, c, h, w = x.size()  # 获取输入张量的尺寸：批次、通道、高度、宽度
         group_x = x.reshape(b * self.groups, -1, h, w)  # 将张量按组重构：批次*组数, 通道/组数, 高度, 宽度
         x_h = self.pool_h(group_x)  # 对高度方向进行池化，结果形状为 (b*groups, c//groups, h, 1)
-        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)  # 对宽度方向进行池化，并转置结果形状为 (b*groups, c//groups, 1, w)
+        x_w = self.pool_w(group_x).permute(
+            0, 1, 3, 2
+        )  # 对宽度方向进行池化，并转置结果形状为 (b*groups, c//groups, 1, w)
         hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))  # 将池化后的特征在高度方向拼接后进行1x1卷积
         x_h, x_w = torch.split(hw, [h, w], dim=2)  # 将卷积后的特征分为高度特征和宽度特征
         x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())  # 结合高度和宽度特征，应用分组归一化
         x2 = self.conv3x3(group_x)  # 对重构后的张量应用3x3卷积
-        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))  # 对 x1 进行自适应平均池化并应用Softmax
+        x11 = self.softmax(
+            self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1)
+        )  # 对 x1 进行自适应平均池化并应用Softmax
         x12 = x2.reshape(b * self.groups, c // self.groups, -1)  # 重构 x2 的形状为 (b*groups, c//groups, h*w)
-        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))  # 对 x2 进行自适应平均池化并应用Softmax
+        x21 = self.softmax(
+            self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1)
+        )  # 对 x2 进行自适应平均池化并应用Softmax
         x22 = x1.reshape(b * self.groups, c // self.groups, -1)  # 重构 x1 的形状为 (b*groups, c//groups, h*w)
-        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(b * self.groups, 1, h, w)  # 计算权重，并重构为 (b*groups, 1, h, w)
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(
+            b * self.groups, 1, h, w
+        )  # 计算权重，并重构为 (b*groups, 1, h, w)
         return (group_x * weights.sigmoid()).reshape(b, c, h, w)  # 将权重应用于原始张量，并重构为原始输入形状
-
-
 
 
 class ChannelAttention(nn.Module):
     def __init__(self, input_channels, internal_neurons):
-        super(ChannelAttention, self).__init__()
-        self.fc1 = nn.Conv2d(in_channels=input_channels, out_channels=internal_neurons, kernel_size=1, stride=1,
-                             bias=True)
-        self.fc2 = nn.Conv2d(in_channels=internal_neurons, out_channels=input_channels, kernel_size=1, stride=1,
-                             bias=True)
+        super().__init__()
+        self.fc1 = nn.Conv2d(
+            in_channels=input_channels, out_channels=internal_neurons, kernel_size=1, stride=1, bias=True
+        )
+        self.fc2 = nn.Conv2d(
+            in_channels=internal_neurons, out_channels=input_channels, kernel_size=1, stride=1, bias=True
+        )
         self.input_channels = input_channels
 
     def forward(self, inputs):
@@ -751,8 +811,7 @@ class ChannelAttention(nn.Module):
 
 
 class CPCA(nn.Module):
-    def __init__(self, in_channels, out_channels,
-                 channelAttention_reduce=4):
+    def __init__(self, in_channels, out_channels, channelAttention_reduce=4):
         super().__init__()
 
         self.C = in_channels
@@ -791,7 +850,7 @@ class CPCA(nn.Module):
         return out
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     x = torch.randn(4, 64, 128, 128).cuda()
     model = CPCA(64, 64).cuda()
     out = model(x)
@@ -803,12 +862,8 @@ import torchvision.ops
 
 
 class RDAttention(nn.Module):
-    """
-    [RDAttention 终极完全体]
-    集成特性：
-    1. Multi-Head Spatial Diffusion: 多头注意力机制，独立学习不同部位的形变。
-    2. Context-Aware Perception: 引入 5x5 上下文感知层，增强偏移量的准确性。
-    3. Full-Capacity Task-Aware: 任务感知模块不进行降维 (reduction=1)，最大化多任务适应能力。
+    """[RDAttention 终极完全体] 集成特性： 1. Multi-Head Spatial Diffusion: 多头注意力机制，独立学习不同部位的形变。 2. Context-Aware Perception: 引入
+    5x5 上下文感知层，增强偏移量的准确性。 3. Full-Capacity Task-Aware: 任务感知模块不进行降维 (reduction=1)，最大化多任务适应能力。.
     """
 
     def __init__(self, c1, c2, k=3, s=1, p=None, g=1, num_groups=4):
@@ -837,28 +892,25 @@ class RDAttention(nn.Module):
         # 1.1 上下文感知层 (Context Perception)
         # 在计算 Offset 前，先用 5x5 DWConv 提取大范围上下文信息
         self.offset_context = nn.Sequential(
-            nn.Conv2d(c1, c1, kernel_size=5, padding=2, groups=c1, bias=False),
-            nn.BatchNorm2d(c1),
-            nn.SiLU()
+            nn.Conv2d(c1, c1, kernel_size=5, padding=2, groups=c1, bias=False), nn.BatchNorm2d(c1), nn.SiLU()
         )
 
         # 1.2 多头偏移与掩码生成器 (Multi-Head Generators)
         # 使用 ModuleList 存储每一组的生成器
-        self.offset_convs = nn.ModuleList([
-            nn.Conv2d(self.group_in_channels, 2 * k * k, kernel_size=k, stride=s, padding=p)
-            for _ in range(num_groups)
-        ])
+        self.offset_convs = nn.ModuleList(
+            [
+                nn.Conv2d(self.group_in_channels, 2 * k * k, kernel_size=k, stride=s, padding=p)
+                for _ in range(num_groups)
+            ]
+        )
 
-        self.mask_convs = nn.ModuleList([
-            nn.Conv2d(self.group_in_channels, k * k, kernel_size=k, stride=s, padding=p)
-            for _ in range(num_groups)
-        ])
+        self.mask_convs = nn.ModuleList(
+            [nn.Conv2d(self.group_in_channels, k * k, kernel_size=k, stride=s, padding=p) for _ in range(num_groups)]
+        )
 
         # 1.3 多头 DCN 权重参数
         # 形状: [num_groups, group_out, group_in, k, k]
-        self.weight = nn.Parameter(
-            torch.empty(num_groups, self.group_out_channels, self.group_in_channels // g, k, k)
-        )
+        self.weight = nn.Parameter(torch.empty(num_groups, self.group_out_channels, self.group_in_channels // g, k, k))
         self.bias = nn.Parameter(torch.empty(c2))
 
         # 1.4 融合层 (Projection)
@@ -911,7 +963,7 @@ class RDAttention(nn.Module):
         nn.init.constant_(self.fc2.bias, 0)
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        b, c, _h, _w = x.shape
 
         # -----------------------------------------------
         # Step 1: 上下文感知 + 多头空间扩散
@@ -940,7 +992,7 @@ class RDAttention(nn.Module):
                 bias=None,  # Bias 最后统一加
                 stride=self.s,
                 padding=self.p,
-                mask=mask
+                mask=mask,
             )
             out_groups.append(out_i)
 
@@ -985,14 +1037,10 @@ class RDAttention(nn.Module):
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.ops
 
 
 class SpatialDiffusionBlock(nn.Module):
-    """
-    [Spatial-Diffusion Block]
-    完全修复版: 保证 offset_scale 被正确定义，防止 AttributeError。
+    """[Spatial-Diffusion Block] 完全修复版: 保证 offset_scale 被正确定义，防止 AttributeError。.
     """
 
     def __init__(self, in_channels, k=3, s=1, p=1):
@@ -1001,7 +1049,7 @@ class SpatialDiffusionBlock(nn.Module):
         self.context_guide = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=5, padding=2, groups=in_channels, bias=False),
             nn.BatchNorm2d(in_channels),
-            nn.SiLU()
+            nn.SiLU(),
         )
         # 2. 偏移量生成
         self.offset_conv = nn.Conv2d(in_channels, 2 * k * k, kernel_size=k, stride=s, padding=p)
@@ -1036,7 +1084,7 @@ class SpatialDiffusionBlock(nn.Module):
         nn.init.constant_(self.mask_conv.bias, 0)
 
         # 如果你的代码里还有这行，现在它不会报错了，因为我们在 __init__ 里定义了它
-        if hasattr(self, 'offset_scale'):
+        if hasattr(self, "offset_scale"):
             nn.init.constant_(self.offset_scale, 0.5)
 
     def forward(self, x):
@@ -1054,17 +1102,13 @@ class SpatialDiffusionBlock(nn.Module):
             bias=self.bias,
             stride=self.stride,
             padding=self.padding,
-            mask=mask
+            mask=mask,
         )
 
 
 class TaskAwareBlock(nn.Module):
-    """
-    [Context-Guided Task-aware Block]
-    修正版特点：
-    1. 使用 5x5 DW-Conv 获取局部上下文 (Local Context)。
-    2. 移除 Gumbel，使用稳定 Softmax。
-    3. 全卷积生成像素级参数，无全局池化。
+    """[Context-Guided Task-aware Block] 修正版特点： 1. 使用 5x5 DW-Conv 获取局部上下文 (Local Context)。 2. 移除 Gumbel，使用稳定 Softmax。 3.
+    全卷积生成像素级参数，无全局池化。.
     """
 
     def __init__(self, channels, k=2):
@@ -1080,10 +1124,9 @@ class TaskAwareBlock(nn.Module):
             nn.Conv2d(channels, channels, kernel_size=5, padding=2, groups=channels, bias=False),
             nn.BatchNorm2d(channels),
             nn.ReLU(inplace=True),
-
             # 第二步：1x1 卷积生成参数
             # 输入: C -> 输出: 2 * k * C
-            nn.Conv2d(channels, 2 * k * channels, kernel_size=1)
+            nn.Conv2d(channels, 2 * k * channels, kernel_size=1),
         )
 
     def forward(self, x):
@@ -1114,14 +1157,14 @@ class TaskAwareBlock(nn.Module):
 
         return final_output
 
+
 class DAUBlock(nn.Module):
-    """
-    [DAU 完整模块]
-    """
+    """[DAU 完整模块]."""
 
     def __init__(self, c1, c2, k=3, s=1, p=None, g=1):
         super().__init__()
-        if p is None: p = k // 2
+        if p is None:
+            p = k // 2
 
         self.c1 = c1
         self.c2 = c2
@@ -1151,17 +1194,16 @@ class DAUBlock(nn.Module):
 
         return self.proj(x)
 
+
 # ----------------------------------------------------
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.ops
-
 
 # ================================================================
 #  模块 1: SpatialDiffusionBlock (保持不变)
 #  负责空间对齐，解决小目标“对不准”的问题
 # ================================================================
+
 
 class SpatialDiffusionBlock(nn.Module):
     def __init__(self, in_channels, k=3, s=1, p=1, offset_scale=2.0, mask_bias_init=2.0):
@@ -1174,7 +1216,7 @@ class SpatialDiffusionBlock(nn.Module):
         self.context_guide = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(in_channels),
-            nn.SiLU()
+            nn.SiLU(),
         )
 
         self.offset_conv = nn.Conv2d(in_channels, 2 * k * k, kernel_size=k, stride=s, padding=p)
@@ -1204,7 +1246,7 @@ class SpatialDiffusionBlock(nn.Module):
             bias=self.bias,
             stride=self.stride,
             padding=self.padding,
-            mask=mask
+            mask=mask,
         )
 
 
@@ -1213,13 +1255,10 @@ class SpatialDiffusionBlock(nn.Module):
 #  修改点: 移除了 reduction，中间层通道数 = 输入通道数
 # ================================================================
 
+
 class ChannelDeNoisingBlock(nn.Module):
-    """
-    [Full-Rank Channel De-noising Block]
-    1. Spike Suppression: 局部平滑去噪。
-    2. Dual-Pool: Max+Avg 双路感知。
-    3. No-Reduction: 全通道交互，不设瓶颈，保留所有特征细节。
-    4. Soft Thresholding: 物理关闭噪音通道。
+    """[Full-Rank Channel De-noising Block] 1. Spike Suppression: 局部平滑去噪。 2. Dual-Pool: Max+Avg 双路感知。 3. No-Reduction:
+    全通道交互，不设瓶颈，保留所有特征细节。 4. Soft Thresholding: 物理关闭噪音通道。.
     """
 
     def __init__(self, channels, threshold=0.1):
@@ -1236,11 +1275,11 @@ class ChannelDeNoisingBlock(nn.Module):
             nn.Flatten(),
             nn.Linear(channels, mid_channels),  # C -> C
             nn.ReLU(inplace=True),
-            nn.Linear(mid_channels, channels)  # C -> C
+            nn.Linear(mid_channels, channels),  # C -> C
         )
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        b, c, _h, _w = x.shape
 
         # 1. 尖峰抑制 (Spike Suppression)
         x_smoothed = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
@@ -1264,14 +1303,14 @@ class ChannelDeNoisingBlock(nn.Module):
 #  模块 3: SCBlock (完整封装)
 # ================================================================
 
+
 class SCBlock(nn.Module):
-    """
-    [Spatial-Channel Block | Full Rank]
-    """
+    """[Spatial-Channel Block | Full Rank]."""
 
     def __init__(self, c1, c2, k=3, s=1, p=None):
         super().__init__()
-        if p is None: p = k // 2
+        if p is None:
+            p = k // 2
 
         self.c1 = c1
         self.c2 = c2
@@ -1321,14 +1360,12 @@ if __name__ == "__main__":
 import torch
 import torch.nn as nn
 
-
 # 假设你已经定义了这两个基础模块
 # from .your_module import SpatialDiffusionBlock, ChannelDeNoisingBlock
 
+
 class ChannelRanker(nn.Module):
-    """
-    [通道评分器]
-    基于 GAP + MLP 给通道打分，用于判断通道是否为"噪音"。
+    """[通道评分器] 基于 GAP + MLP 给通道打分，用于判断通道是否为"噪音"。.
     """
 
     def __init__(self, channels):
@@ -1338,23 +1375,18 @@ class ChannelRanker(nn.Module):
             nn.Conv2d(channels, channels // 2, 1, bias=False),
             nn.ReLU(),
             nn.Conv2d(channels // 2, channels, 1, bias=False),
-            nn.Sigmoid()  # 输出 0~1 的分值
+            nn.Sigmoid(),  # 输出 0~1 的分值
         )
 
     def forward(self, x):
         # x: [B, C, H, W] -> scores: [B, C, 1, 1]
         return self.scorer(self.avg_pool(x))
 
+
 class SDC_Selective_Fusion(nn.Module):
-    """
-    [SDC 动态筛选融合模块]
-    Inputs: [Deep_Feature(LowRes), Current_Feature(HighRes)]
-    Logic:
-      1. Align & Upsample Deep Feature.
-      2. Spatial Fusion -> SpatialDiffusionBlock.
-      3. Channel Fusion -> ChannelDeNoisingBlock.
-      4. Ranker: 给去噪后的通道打分。
-      5. Selector: 物理保留分数最高的 c2 个通道 (通常 c2 = c_in / 2)。
+    """[SDC 动态筛选融合模块] Inputs: [Deep_Feature(LowRes), Current_Feature(HighRes)] Logic: 1. Align & Upsample Deep Feature.
+    2. Spatial Fusion -> SpatialDiffusionBlock. 3. Channel Fusion -> ChannelDeNoisingBlock. 4. Ranker: 给去噪后的通道打分。 5.
+    Selector: 物理保留分数最高的 c2 个通道 (通常 c2 = c_in / 2)。.
     """
 
     def __init__(self, c1, c2):
@@ -1400,7 +1432,7 @@ class SDC_Selective_Fusion(nn.Module):
 
         # 尺寸对齐
         if ds_up.size()[-2:] != x_ca.size()[-2:]:
-            ds_up = torch.nn.functional.interpolate(ds_up, size=x_ca.shape[-2:], mode='nearest')
+            ds_up = torch.nn.functional.interpolate(ds_up, size=x_ca.shape[-2:], mode="nearest")
 
         # --- Step 2: Spatial Fusion ---
         spatial_in = torch.cat([ds_up, x_ca], dim=1)
@@ -1432,13 +1464,12 @@ class SDC_Selective_Fusion(nn.Module):
 
 
 class CEAttention(nn.Module):
-    """
-    [DAU 完整模块]
-    """
+    """[DAU 完整模块]."""
 
     def __init__(self, c1, c2, k=3, s=1, p=None, g=1):
         super().__init__()
-        if p is None: p = k // 2
+        if p is None:
+            p = k // 2
 
         self.c1 = c1
         self.c2 = c2
@@ -1463,21 +1494,16 @@ class CEAttention(nn.Module):
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class SpatialGate(nn.Module):
-    """
-    空间门控：生成 [B, 1, H, W] 的掩码
-    """
+    """空间门控：生成 [B, 1, H, W] 的掩码."""
 
     def __init__(self):
-        super(SpatialGate, self).__init__()
+        super().__init__()
         # 7x7 卷积感受野大，适合把破碎的小目标连成一片
         self.spatial = nn.Sequential(
-            nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False),
-            nn.BatchNorm2d(1),
-            nn.Sigmoid()
+            nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False), nn.BatchNorm2d(1), nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -1491,12 +1517,10 @@ class SpatialGate(nn.Module):
 
 
 class VarianceChannelGate(nn.Module):
-    """
-    方差通道门控：基于空间掩码后的特征计算方差
-    """
+    """方差通道门控：基于空间掩码后的特征计算方差."""
 
     def __init__(self, channels, reduction=8):
-        super(VarianceChannelGate, self).__init__()
+        super().__init__()
         # 守住底线 16，防止 Nano 模型通道被压得太扁
         mid_channels = max(channels // reduction, 16)
 
@@ -1505,11 +1529,11 @@ class VarianceChannelGate(nn.Module):
             nn.Linear(channels, mid_channels),
             nn.ReLU(inplace=True),
             nn.Linear(mid_channels, channels),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
 
     def forward(self, x, spatial_mask):
-        b, c, h, w = x.shape
+        b, c, _h, _w = x.shape
 
         # 1. 空间掩码聚焦
         x_focused = x * spatial_mask
@@ -1529,14 +1553,13 @@ class VarianceChannelGate(nn.Module):
 
 
 class VGASBlock(nn.Module):
-    """
-    [Variance-Guided Attention & Spatial Block]
-    适用于 YOLO11n 的轻量级去噪模块
+    """[Variance-Guided Attention & Spatial Block] 适用于 YOLO11n 的轻量级去噪模块.
     """
 
     def __init__(self, c1, c2, k=3, s=1, p=None):
         super().__init__()
-        if p is None: p = k // 2
+        if p is None:
+            p = k // 2
 
         # 1. 基础特征提取
         self.conv = nn.Conv2d(c1, c1, k, s, p, bias=False)
@@ -1602,9 +1625,11 @@ if __name__ == "__main__":
     loss = y2.sum()
     loss.backward()
     print("Backward pass successful.")
+
+
 class PolarizedAttention(nn.Module):
     def __init__(self, inplanes, planes, kernel_size=1, stride=1):
-        super(PolarizedAttention, self).__init__()
+        super().__init__()
 
         self.inplanes = inplanes
         self.inter_planes = planes // 2
@@ -1614,17 +1639,20 @@ class PolarizedAttention(nn.Module):
         self.padding = (kernel_size - 1) // 2
 
         self.conv_q_right = nn.Conv2d(self.inplanes, 1, kernel_size=1, stride=stride, padding=0, bias=False)
-        self.conv_v_right = nn.Conv2d(self.inplanes, self.inter_planes, kernel_size=1, stride=stride, padding=0,
-                                      bias=False)
+        self.conv_v_right = nn.Conv2d(
+            self.inplanes, self.inter_planes, kernel_size=1, stride=stride, padding=0, bias=False
+        )
         self.conv_up = nn.Conv2d(self.inter_planes, self.planes, kernel_size=1, stride=1, padding=0, bias=False)
         self.softmax_right = nn.Softmax(dim=2)
         self.sigmoid = nn.Sigmoid()
 
-        self.conv_q_left = nn.Conv2d(self.inplanes, self.inter_planes, kernel_size=1, stride=stride, padding=0,
-                                     bias=False)  # g
+        self.conv_q_left = nn.Conv2d(
+            self.inplanes, self.inter_planes, kernel_size=1, stride=stride, padding=0, bias=False
+        )  # g
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv_v_left = nn.Conv2d(self.inplanes, self.inter_planes, kernel_size=1, stride=stride, padding=0,
-                                     bias=False)  # theta
+        self.conv_v_left = nn.Conv2d(
+            self.inplanes, self.inter_planes, kernel_size=1, stride=stride, padding=0, bias=False
+        )  # theta
         self.softmax_left = nn.Softmax(dim=2)
 
     def spatial_pool(self, x):
@@ -1668,7 +1696,7 @@ class PolarizedAttention(nn.Module):
         return out
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     x = torch.randn(4, 512, 7, 7).cuda()
     model = PolarizedAttention(512, 512).cuda()
     out = model(x)
@@ -1676,15 +1704,14 @@ if __name__ == '__main__':
 
 
 class EdgeSkipGate(nn.Module):
-    """
-    EdgeSkipGate: 单输入绿线门控残差模块（边缘引导，抑噪优先）
+    """EdgeSkipGate: 单输入绿线门控残差模块（边缘引导，抑噪优先）.
 
     输入/输出: (B, C, H, W) 不变
 
     设计：
     1) Channel Gate（SE-like）：抑制背景敏感通道
     2) Spatial Gate（edge-guided）：使用 [avg, max, edge_mag] 预测空间门控
-       - edge_mag 由固定 Sobel 卷积提取（不增加可学习参数）
+    - edge_mag 由固定 Sobel 卷积提取（不增加可学习参数）
     3) ResNet-style：y = x + gamma * (x * gate)，gamma 初始为 0 保证稳定
     """
 
@@ -1707,12 +1734,8 @@ class EdgeSkipGate(nn.Module):
         self.sg_conv = nn.Conv2d(3, 1, k, 1, p, bias=True)
 
         # -------- Fixed Sobel kernels (registered buffers) --------
-        sobel_x = torch.tensor([[1, 0, -1],
-                                [2, 0, -2],
-                                [1, 0, -1]], dtype=torch.float32).view(1, 1, 3, 3)
-        sobel_y = torch.tensor([[1,  2,  1],
-                                [0,  0,  0],
-                                [-1, -2, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+        sobel_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32).view(1, 1, 3, 3)
         self.register_buffer("sobel_x", sobel_x, persistent=False)
         self.register_buffer("sobel_y", sobel_y, persistent=False)
 
@@ -1720,9 +1743,7 @@ class EdgeSkipGate(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, dtype=torch.float32))
 
     def _edge_mag(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        计算边缘幅值图 edge_mag: (B, 1, H, W)
-        做法：先把多通道 x 压成 1 通道（均值），再用 Sobel 提取梯度
+        """计算边缘幅值图 edge_mag: (B, 1, H, W) 做法：先把多通道 x 压成 1 通道（均值），再用 Sobel 提取梯度.
         """
         # x_gray: (B,1,H,W)
         x_gray = x.mean(dim=1, keepdim=True)
@@ -1753,12 +1774,12 @@ class EdgeSkipGate(nn.Module):
         ch = torch.sigmoid(self.cg_fc2(ch))  # (B,C,1,1)
 
         # -------- Spatial gate (avg/max/edge) --------
-        avg_map = x.mean(dim=1, keepdim=True)      # (B,1,H,W)
-        max_map = x.amax(dim=1, keepdim=True)      # (B,1,H,W)
-        edge_mag = self._edge_mag(x)               # (B,1,H,W)
+        avg_map = x.mean(dim=1, keepdim=True)  # (B,1,H,W)
+        max_map = x.amax(dim=1, keepdim=True)  # (B,1,H,W)
+        edge_mag = self._edge_mag(x)  # (B,1,H,W)
 
         sp_in = torch.cat([avg_map, max_map, edge_mag], dim=1)  # (B,3,H,W)
-        sp = torch.sigmoid(self.sg_conv(sp_in))                 # (B,1,H,W)
+        sp = torch.sigmoid(self.sg_conv(sp_in))  # (B,1,H,W)
 
         gate = ch * sp  # broadcast -> (B,C,H,W)
 
@@ -1766,9 +1787,10 @@ class EdgeSkipGate(nn.Module):
         gamma = self.gamma.to(dtype=x.dtype)
         return x + gamma * (x * gate)
 
+
 class HDRAB(nn.Module):
     def __init__(self, in_channels=64, out_channels=64, bias=True):
-        super(HDRAB, self).__init__()
+        super().__init__()
         kernel_size = 3
         reduction = 8
         reduction_2 = 2
@@ -1777,33 +1799,81 @@ class HDRAB(nn.Module):
 
         self.conv1x1_1 = nn.Conv2d(in_channels, in_channels // reduction_2, 1)
 
-        self.conv1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                               padding=1, dilation=1, bias=bias)
+        self.conv1 = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=1,
+            dilation=1,
+            bias=bias,
+        )
         self.relu1 = nn.ReLU(inplace=True)
 
-        self.conv2 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                               padding=2, dilation=2, bias=bias)
+        self.conv2 = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=2,
+            dilation=2,
+            bias=bias,
+        )
 
-        self.conv3 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                               padding=3, dilation=3, bias=bias)
+        self.conv3 = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=3,
+            dilation=3,
+            bias=bias,
+        )
         self.relu3 = nn.ReLU(inplace=True)
 
-        self.conv4 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                               padding=4, dilation=4, bias=bias)
+        self.conv4 = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=4,
+            dilation=4,
+            bias=bias,
+        )
 
-        self.conv3_1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                                 padding=3, dilation=3, bias=bias)
+        self.conv3_1 = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=3,
+            dilation=3,
+            bias=bias,
+        )
         self.relu3_1 = nn.ReLU(inplace=True)
 
-        self.conv2_1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                                 padding=2, dilation=2, bias=bias)
+        self.conv2_1 = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=2,
+            dilation=2,
+            bias=bias,
+        )
 
-        self.conv1_1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                                 padding=1, dilation=1, bias=bias)
+        self.conv1_1 = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=1,
+            dilation=1,
+            bias=bias,
+        )
         self.relu1_1 = nn.ReLU(inplace=True)
 
-        self.conv_tail = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size,
-                                   padding=1, dilation=1, bias=bias)
+        self.conv_tail = nn.Conv2d(
+            in_channels // reduction_2,
+            out_channels // reduction_2,
+            kernel_size=kernel_size,
+            padding=1,
+            dilation=1,
+            bias=bias,
+        )
 
         self.conv1x1_2 = nn.Conv2d(in_channels // reduction_2, in_channels, 1)
 
@@ -1835,9 +1905,8 @@ class HDRAB(nn.Module):
         return y9_1
 
 
-
 class SPDConv(nn.Module):
-    """标准卷积层，支持多种参数配置，包括输入通道数、输出通道数、卷积核大小、步幅、填充、分组、膨胀因子和激活函数。
+    """标准卷积层，支持多种参数配置，包括输入通道数、输出通道数、卷积核大小、步幅、填充、分组、膨胀因子和激活函数。.
 
     参数:
         c1 (int): 输入通道数
@@ -1849,10 +1918,11 @@ class SPDConv(nn.Module):
         d (int or list, optional): 膨胀因子，默认为1
         act (bool or nn.Module, optional): 是否使用激活函数，默认为True
     """
+
     default_act = nn.SiLU()  # 默认激活函数为SiLU
 
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
-        """初始化卷积层。
+        """初始化卷积层。.
 
         参数:
             c1 (int): 输入通道数
@@ -1868,10 +1938,12 @@ class SPDConv(nn.Module):
         c1 = c1 * 4  # 将输入通道数乘以4
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)  # 定义卷积层
         self.bn = nn.BatchNorm2d(c2)  # 定义批量归一化层
-        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()  # 定义激活函数
+        self.act = (
+            self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        )  # 定义激活函数
 
     def forward(self, x):
-        """前向传播函数，对输入进行卷积、批量归一化和激活操作。
+        """前向传播函数，对输入进行卷积、批量归一化和激活操作。.
 
         参数:
             x (torch.Tensor): 输入张量
@@ -1885,7 +1957,7 @@ class SPDConv(nn.Module):
         return self.act(self.bn(self.conv(x)))
 
     def forward_fuse(self, x):
-        """前向传播函数（融合版本），对输入进行卷积和激活操作，不包含批量归一化。
+        """前向传播函数（融合版本），对输入进行卷积和激活操作，不包含批量归一化。.
 
         参数:
             x (torch.Tensor): 输入张量
@@ -1900,23 +1972,17 @@ class SPDConv(nn.Module):
 
 
 class CARAFE(nn.Module):
-    """
-    CARAFE 是一种上采样模块，通过学习的权重对特征图进行上采样。
-    参数:
-        c (int): 输入通道数
-        k_enc (int): 编码器部分的卷积核大小
-        k_up (int): 上采样时使用的 unfold 核大小
-        c_mid (int): 中间通道数
-        scale (int): 上采样倍率
+    """CARAFE 是一种上采样模块，通过学习的权重对特征图进行上采样。 参数: c (int): 输入通道数 k_enc (int): 编码器部分的卷积核大小 k_up (int): 上采样时使用的 unfold 核大小
+    c_mid (int): 中间通道数 scale (int): 上采样倍率.
     """
 
     def __init__(self, c, k_enc=3, k_up=5, c_mid=64, scale=2):
-        super(CARAFE, self).__init__()
-        print(k_enc,k_up)
+        super().__init__()
+        print(k_enc, k_up)
         self.scale = scale  # 设置上采样倍率
 
         # 压缩输入通道到中间通道数
-        self.comp = Conv(c, c_mid,act=nn.ReLU())
+        self.comp = Conv(c, c_mid, act=nn.ReLU())
 
         # 编码器生成权重，输出通道数为(scale * k_up)^2
         self.enc = Conv(c_mid, (scale * k_up) ** 2, k=k_enc, act=False)
@@ -1925,11 +1991,10 @@ class CARAFE(nn.Module):
         self.pix_shf = nn.PixelShuffle(scale)
 
         # 最近邻插值方法作为上采样操作
-        self.upsmp = nn.Upsample(scale_factor=scale, mode='nearest')
+        self.upsmp = nn.Upsample(scale_factor=scale, mode="nearest")
 
         # Unfold 操作提取感受野内的特征
-        self.unfold = nn.Unfold(kernel_size=k_up, dilation=scale,
-                                padding=k_up // 2 * scale)
+        self.unfold = nn.Unfold(kernel_size=k_up, dilation=scale, padding=k_up // 2 * scale)
 
     def forward(self, X):
         b, c, h, w = X.size()  # 获取输入张量的形状
@@ -1944,9 +2009,8 @@ class CARAFE(nn.Module):
         X = self.unfold(X)  # 提取上采样后特征的感受野
         X = X.view(b, c, -1, h_, w_)  # 调整视图以分离感受野维度
 
-        X = torch.einsum('bkhw,bckhw->bchw', [W, X])  # 应用注意力机制加权聚合
+        X = torch.einsum("bkhw,bckhw->bchw", [W, X])  # 应用注意力机制加权聚合
         return X  # 返回上采样后的特征图
-
 
 
 class C1(nn.Module):
@@ -2226,10 +2290,19 @@ class BottleneckCSP(nn.Module):
 
 def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
     result = nn.Sequential()
-    result.add_module('conv', nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                                        kernel_size=kernel_size, stride=stride, padding=padding, groups=groups,
-                                        bias=False))
-    result.add_module('bn', nn.BatchNorm2d(num_features=out_channels))
+    result.add_module(
+        "conv",
+        nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=groups,
+            bias=False,
+        ),
+    )
+    result.add_module("bn", nn.BatchNorm2d(num_features=out_channels))
 
     return result
 
@@ -3673,15 +3746,13 @@ class SAVPE(nn.Module):
 
 
 import torch
-import torch.nn as nn
 import torch.fft
+import torch.nn as nn
 
 
 class FCSA(nn.Module):
-    """
-    Frequency-coordinated Self-Attention (FCSA)
-    针对小目标设计的频率协调自注意力模块。
-    修复版：严格强制全过程频域计算使用 Float32，解决 cuFFT 在 FP16 下对非 2 幂次尺寸的限制。
+    """Frequency-coordinated Self-Attention (FCSA) 针对小目标设计的频率协调自注意力模块。 修复版：严格强制全过程频域计算使用 Float32，解决 cuFFT 在 FP16 下对非 2
+    幂次尺寸的限制。.
     """
 
     def __init__(self, c1, c2):
@@ -3706,14 +3777,14 @@ class FCSA(nn.Module):
         x_fp32 = x.to(torch.float32)
 
         # F_FC = FFT(M)
-        f_fc = torch.fft.fft2(x_fp32, norm='ortho')
+        f_fc = torch.fft.fft2(x_fp32, norm="ortho")
 
         # W_FC 权重计算
         w_fc = self.conv_wfc(self.gap(x)).to(torch.float32)
 
         # M'_FC = IFFT(F_FC * W_FC)
         #
-        m_fc_prime = torch.fft.ifft2(f_fc * w_fc, norm='ortho').real
+        m_fc_prime = torch.fft.ifft2(f_fc * w_fc, norm="ortho").real
 
         # 转回原始精度进行空域混合
         m_fc_prime = m_fc_prime.to(orig_dtype)
@@ -3723,35 +3794,34 @@ class FCSA(nn.Module):
         # 2. 频域空间调制 (Frequency-Guided Spatial Modulation)
         # ==========================================
         # 【关键修复点】：确保进入 conv 后、进入 fft 前，全部转换为 fp32
-        m_fc_fp32 = m_fc.to(torch.float32)
+        m_fc.to(torch.float32)
 
         # M'_FS = FFT(Conv1x1(M_FC))
         # 先执行卷积，再强制转 fp32，最后进 fft
         f_fs_input = self.conv_fs_prime(m_fc).to(torch.float32)
-        f_fs_prime = torch.fft.fft2(f_fs_input, norm='ortho')
+        f_fs_prime = torch.fft.fft2(f_fs_input, norm="ortho")
 
         # W_FS = Conv1x1(M_FC)
         w_fs = self.conv_wfs(m_fc).to(torch.float32)
 
         # M_FS = IFFT(M'_FS * W_FS)
         #
-        m_fs = torch.fft.ifft2(f_fs_prime * w_fs, norm='ortho').real
+        m_fs = torch.fft.ifft2(f_fs_prime * w_fs, norm="ortho").real
 
         # 最终输出转回原始精度并处理通道
         return self.cv_out(m_fs.to(orig_dtype))
 
+
 import torch
 import torch.nn as nn
-from einops import rearrange
+
 from .conv import Conv
 
 
 class LowRankMix(nn.Module):
+    """低秩 1x1 混合层 用 C -> r -> C 替代原始 C -> C 的重型 1x1 并保留残差，避免直接伤主表达.
     """
-    低秩 1x1 混合层
-    用 C -> r -> C 替代原始 C -> C 的重型 1x1
-    并保留残差，避免直接伤主表达
-    """
+
     def __init__(self, dim, ratio=0.25, min_dim=64):
         super().__init__()
         hidden = max(int(dim * ratio), min_dim)
@@ -3778,10 +3848,9 @@ class LowRankMix(nn.Module):
 
 
 class SADEConv(nn.Module):
+    """只改 feature 分支第二个超重 1x1： 普通 1x1 -> 低秩残差混合.
     """
-    只改 feature 分支第二个超重 1x1：
-    普通 1x1 -> 低秩残差混合
-    """
+
     def __init__(
         self,
         c1,
@@ -3790,12 +3859,12 @@ class SADEConv(nn.Module):
         s=1,
         weight_act="softmax",
         temperature=1.0,
-        mix_ratio=0.25,   # 新增：低秩比例
+        mix_ratio=0.25,  # 新增：低秩比例
     ):
         super().__init__()
         self.kernel_size = k
         self.stride = s
-        self.k2 = k ** 2
+        self.k2 = k**2
         self.weight_act = weight_act
         self.temperature = temperature
 
@@ -3810,13 +3879,7 @@ class SADEConv(nn.Module):
         self.weight_dw5 = nn.Conv2d(c1, c1, 5, 1, 2, groups=c1, bias=False)
         self.weight_dwd = nn.Conv2d(c1, c1, 3, 1, 2, dilation=2, groups=c1, bias=False)
 
-        self.weight_fuse = nn.Conv2d(
-            c1 * 3,
-            c1 * self.k2,
-            kernel_size=1,
-            groups=c1,
-            bias=False
-        )
+        self.weight_fuse = nn.Conv2d(c1 * 3, c1 * self.k2, kernel_size=1, groups=c1, bias=False)
 
         # -------------------------
         # Path2: RF feature branch
@@ -3826,15 +3889,7 @@ class SADEConv(nn.Module):
         feat_dim = c1 * self.k2
 
         self.feature_pre = nn.Sequential(
-            nn.Conv2d(
-                c1,
-                feat_dim,
-                kernel_size=k,
-                stride=s,
-                padding=k // 2,
-                groups=c1,
-                bias=False
-            ),
+            nn.Conv2d(c1, feat_dim, kernel_size=k, stride=s, padding=k // 2, groups=c1, bias=False),
             nn.BatchNorm2d(feat_dim),
             nn.ReLU(inplace=True),
         )
@@ -3852,18 +3907,14 @@ class SADEConv(nn.Module):
         # Base residual branch
         # -------------------------
         self.base_proj = nn.Sequential(
-            nn.Conv2d(c1, c2, kernel_size=1, stride=s, padding=0, bias=False),
-            nn.BatchNorm2d(c2)
+            nn.Conv2d(c1, c2, kernel_size=1, stride=s, padding=0, bias=False), nn.BatchNorm2d(c2)
         )
 
         # -------------------------
         # Gate branch
         # 保持你原逻辑
         # -------------------------
-        self.gate = nn.Sequential(
-            nn.Conv2d(c2, c2, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.Sigmoid()
-        )
+        self.gate = nn.Sequential(nn.Conv2d(c2, c2, kernel_size=1, stride=1, padding=0, bias=True), nn.Sigmoid())
 
     def _get_attention_weight(self, x):
         b, c = x.shape[:2]
@@ -3893,7 +3944,7 @@ class SADEConv(nn.Module):
         b, c = x.shape[:2]
 
         # Path1
-        weight = self._get_attention_weight(x)   # [B, C, k^2, h, w]
+        weight = self._get_attention_weight(x)  # [B, C, k^2, h, w]
         h, w = weight.shape[3:]
 
         # Path2
@@ -3905,10 +3956,7 @@ class SADEConv(nn.Module):
         # Attention aggregation
         weighted_data = feature * weight
         conv_data = rearrange(
-            weighted_data,
-            "b c (n1 n2) h w -> b c (h n1) (w n2)",
-            n1=self.kernel_size,
-            n2=self.kernel_size
+            weighted_data, "b c (n1 n2) h w -> b c (h n1) (w n2)", n1=self.kernel_size, n2=self.kernel_size
         )
         x_att = self.att_conv(conv_data)
 
@@ -3930,14 +3978,12 @@ MSRA_RFAConv = SADEConv
 # ===== add into ultralytics/nn/modules/block.py =====
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class DropBlock2D(nn.Module):
+    """Simple DropBlock for 2D feature maps. Applied only during training.
     """
-    Simple DropBlock for 2D feature maps.
-    Applied only during training.
-    """
+
     def __init__(self, drop_prob=0.0, block_size=3):
         super().__init__()
         self.drop_prob = float(drop_prob)
@@ -3972,7 +4018,7 @@ class DropBlock2D(nn.Module):
         _, _, h, w = x.shape
         valid_h = h - self.block_size + 1
         valid_w = w - self.block_size + 1
-        return self.drop_prob * (h * w) / (self.block_size ** 2) / (valid_h * valid_w + 1e-6)
+        return self.drop_prob * (h * w) / (self.block_size**2) / (valid_h * valid_w + 1e-6)
 
 
 class _NASConvBN(nn.Module):
@@ -3987,9 +4033,8 @@ class _NASConvBN(nn.Module):
 
 
 class _NASReLUConvBN(nn.Module):
-    """
-    ReLU -> Conv -> BN -> DropBlock
-    """
+    """ReLU -> Conv -> BN -> DropBlock."""
+
     def __init__(self, c1, c2, k=3, s=1, p=1, drop_prob=0.0, block_size=3):
         super().__init__()
         self.act = nn.ReLU(inplace=True)
@@ -4011,7 +4056,8 @@ class _NASBaseMergeCell(nn.Module):
         self.with_out_conv = with_out_conv
         self.out_conv = (
             _NASReLUConvBN(channels, channels, 3, 1, 1, drop_prob=drop_prob, block_size=block_size)
-            if with_out_conv else nn.Identity()
+            if with_out_conv
+            else nn.Identity()
         )
 
     @staticmethod
@@ -4058,11 +4104,8 @@ class _NASGlobalPoolingCell(_NASBaseMergeCell):
 
 
 class NASFPN(nn.Module):
-    """
-    Modified NAS-FPN for Ultralytics.
-    Input:  [C2, C3, C4, C5]
-    Output: [P2, P3, P4, P5, P6]
-    Usually Detect uses P2, P3, P4 (or P2, P3, P4, P5).
+    """Modified NAS-FPN for Ultralytics. Input: [C2, C3, C4, C5] Output: [P2, P3, P4, P5, P6] Usually Detect uses P2,
+    P3, P4 (or P2, P3, P4, P5).
     """
 
     def __init__(
@@ -4093,44 +4136,43 @@ class NASFPN(nn.Module):
         extra_levels = num_outs - len(in_channels)  # normally 1
         for _ in range(extra_levels):
             self.extra_downsamples.append(
-                nn.Sequential(
-                    _NASConvBN(out_channels, out_channels, 1, 1, 0),
-                    nn.MaxPool2d(2, 2)
-                )
+                nn.Sequential(_NASConvBN(out_channels, out_channels, 1, 1, 0), nn.MaxPool2d(2, 2))
             )
 
         # shifted topology: original P3-P7 -> now P2-P6
         self.fpn_stages = nn.ModuleList()
         for _ in range(stack_times):
-            stage = nn.ModuleDict({
-                "gp_53_3": _NASGlobalPoolingCell(
-                    out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
-                ),   # gp(p5, p3) -> p3_1
-                "sum_33_3": _NASSumCell(
-                    out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
-                ),    # sum(p3_1, p3) -> p3_2
-                "sum_32_2": _NASSumCell(
-                    out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
-                ),    # sum(p3_2, p2) -> p2_out
-                "sum_23_3": _NASSumCell(
-                    out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
-                ),    # sum(p2_out, p3_2) -> p3_out
-                "gp_32_4": _NASGlobalPoolingCell(
-                    out_channels, with_out_conv=False, drop_prob=drop_prob, block_size=block_size
-                ),   # gp(p3_out, p2_out) -> p4_tmp
-                "sum_44_4": _NASSumCell(
-                    out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
-                ),    # sum(p4, p4_tmp) -> p4_out
-                "gp_43_6": _NASGlobalPoolingCell(
-                    out_channels, with_out_conv=False, drop_prob=drop_prob, block_size=block_size
-                ),   # gp(p4_out, p3_2) -> p6_tmp
-                "sum_66_6": _NASSumCell(
-                    out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
-                ),    # sum(p6, p6_tmp) -> p6_out
-                "gp_64_5": _NASGlobalPoolingCell(
-                    out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
-                ),   # gp(p6_out, p4_out) -> p5_out
-            })
+            stage = nn.ModuleDict(
+                {
+                    "gp_53_3": _NASGlobalPoolingCell(
+                        out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
+                    ),  # gp(p5, p3) -> p3_1
+                    "sum_33_3": _NASSumCell(
+                        out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
+                    ),  # sum(p3_1, p3) -> p3_2
+                    "sum_32_2": _NASSumCell(
+                        out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
+                    ),  # sum(p3_2, p2) -> p2_out
+                    "sum_23_3": _NASSumCell(
+                        out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
+                    ),  # sum(p2_out, p3_2) -> p3_out
+                    "gp_32_4": _NASGlobalPoolingCell(
+                        out_channels, with_out_conv=False, drop_prob=drop_prob, block_size=block_size
+                    ),  # gp(p3_out, p2_out) -> p4_tmp
+                    "sum_44_4": _NASSumCell(
+                        out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
+                    ),  # sum(p4, p4_tmp) -> p4_out
+                    "gp_43_6": _NASGlobalPoolingCell(
+                        out_channels, with_out_conv=False, drop_prob=drop_prob, block_size=block_size
+                    ),  # gp(p4_out, p3_2) -> p6_tmp
+                    "sum_66_6": _NASSumCell(
+                        out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
+                    ),  # sum(p6, p6_tmp) -> p6_out
+                    "gp_64_5": _NASGlobalPoolingCell(
+                        out_channels, with_out_conv=True, drop_prob=drop_prob, block_size=block_size
+                    ),  # gp(p6_out, p4_out) -> p5_out
+                }
+            )
             self.fpn_stages.append(stage)
 
     def forward(self, inputs):
@@ -4147,27 +4189,24 @@ class NASFPN(nn.Module):
         for stage in self.fpn_stages:
             p3_1 = stage["gp_53_3"](p5, p3, out_size=p3.shape[-2:])
             p3_2 = stage["sum_33_3"](p3_1, p3, out_size=p3.shape[-2:])
-            p2   = stage["sum_32_2"](p3_2, p2, out_size=p2.shape[-2:])
-            p3   = stage["sum_23_3"](p2, p3_2, out_size=p3.shape[-2:])
+            p2 = stage["sum_32_2"](p3_2, p2, out_size=p2.shape[-2:])
+            p3 = stage["sum_23_3"](p2, p3_2, out_size=p3.shape[-2:])
             p4_t = stage["gp_32_4"](p3, p2, out_size=p4.shape[-2:])
-            p4   = stage["sum_44_4"](p4, p4_t, out_size=p4.shape[-2:])
+            p4 = stage["sum_44_4"](p4, p4_t, out_size=p4.shape[-2:])
             p6_t = stage["gp_43_6"](p4, p3_2, out_size=p6.shape[-2:])
-            p6   = stage["sum_66_6"](p6, p6_t, out_size=p6.shape[-2:])
-            p5   = stage["gp_64_5"](p6, p4, out_size=p5.shape[-2:])
+            p6 = stage["sum_66_6"](p6, p6_t, out_size=p6.shape[-2:])
+            p5 = stage["gp_64_5"](p6, p4, out_size=p5.shape[-2:])
 
         return [p2, p3, p4, p5, p6]
 
 
-
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from typing import Optional
-def drop_path_f(x, drop_prob: float = 0., training: bool = False):
+
+
+def drop_path_f(x, drop_prob: float = 0.0, training: bool = False):
     """Drop paths per sample."""
-    if drop_prob == 0. or not training:
+    if drop_prob == 0.0 or not training:
         return x
 
     keep_prob = 1 - drop_prob
@@ -4179,6 +4218,7 @@ def drop_path_f(x, drop_prob: float = 0., training: bool = False):
 
 class DropPath(nn.Module):
     """Drop paths per sample."""
+
     def __init__(self, drop_prob=None):
         super().__init__()
         self.drop_prob = drop_prob
@@ -4188,8 +4228,7 @@ class DropPath(nn.Module):
 
 
 def window_partition(x, window_size: int):
-    """
-    Partition feature map into non-overlapping windows.
+    """Partition feature map into non-overlapping windows.
 
     Args:
         x: Tensor with shape (B, H, W, C).
@@ -4199,22 +4238,14 @@ def window_partition(x, window_size: int):
         windows: Tensor with shape (num_windows * B, window_size, window_size, C).
     """
     B, H, W, C = x.shape
-    x = x.view(
-        B,
-        H // window_size,
-        window_size,
-        W // window_size,
-        window_size,
-        C
-    )
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous()
     windows = windows.view(-1, window_size, window_size, C)
     return windows
 
 
 def window_reverse(windows, window_size: int, H: int, W: int):
-    """
-    Reverse windows back to feature map.
+    """Reverse windows back to feature map.
 
     Args:
         windows: Tensor with shape (num_windows * B, window_size, window_size, C).
@@ -4226,14 +4257,7 @@ def window_reverse(windows, window_size: int, H: int, W: int):
         x: Tensor with shape (B, H, W, C).
     """
     B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(
-        B,
-        H // window_size,
-        W // window_size,
-        window_size,
-        window_size,
-        -1
-    )
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
     x = x.view(B, H, W, -1)
     return x
@@ -4241,14 +4265,8 @@ def window_reverse(windows, window_size: int, H: int, W: int):
 
 class Mlp(nn.Module):
     """MLP used in Swin Transformer."""
-    def __init__(
-        self,
-        in_features,
-        hidden_features=None,
-        out_features=None,
-        act_layer=nn.GELU,
-        drop=0.
-    ):
+
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.0):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -4270,28 +4288,18 @@ class Mlp(nn.Module):
 
 class WindowAttention(nn.Module):
     """Window-based multi-head self-attention with relative position bias."""
-    def __init__(
-        self,
-        dim,
-        window_size,
-        num_heads,
-        qkv_bias=True,
-        attn_drop=0.,
-        proj_drop=0.
-    ):
+
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
         self.dim = dim
         self.window_size = window_size
         self.num_heads = num_heads
 
         head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
 
         self.relative_position_bias_table = nn.Parameter(
-            torch.zeros(
-                (2 * window_size[0] - 1) * (2 * window_size[1] - 1),
-                num_heads
-            )
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
         )
 
         coords_h = torch.arange(self.window_size[0])
@@ -4315,30 +4323,20 @@ class WindowAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.softmax = nn.Softmax(dim=-1)
 
-        nn.init.trunc_normal_(self.relative_position_bias_table, std=.02)
+        nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
 
-    def forward(self, x, mask: Optional[torch.Tensor] = None):
+    def forward(self, x, mask: torch.Tensor | None = None):
         B_, N, C = x.shape
 
-        qkv = self.qkv(x).reshape(
-            B_,
-            N,
-            3,
-            self.num_heads,
-            C // self.num_heads
-        ).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
 
         q, k, v = qkv.unbind(0)
 
         q = q * self.scale
         attn = q @ k.transpose(-2, -1)
 
-        relative_position_bias = self.relative_position_bias_table[
-            self.relative_position_index.view(-1)
-        ].view(
-            self.window_size[0] * self.window_size[1],
-            self.window_size[0] * self.window_size[1],
-            -1
+        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1
         )
 
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
@@ -4346,13 +4344,7 @@ class WindowAttention(nn.Module):
 
         if mask is not None:
             nW = mask.shape[0]
-            attn = attn.view(
-                B_ // nW,
-                nW,
-                self.num_heads,
-                N,
-                N
-            ) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
 
             attn = attn.view(-1, self.num_heads, N, N)
             attn = self.softmax(attn)
@@ -4369,6 +4361,7 @@ class WindowAttention(nn.Module):
 
 class SwinTransformerLayer(nn.Module):
     """Swin Transformer layer used in C3STR."""
+
     def __init__(
         self,
         c,
@@ -4377,11 +4370,11 @@ class SwinTransformerLayer(nn.Module):
         shift_size=0,
         mlp_ratio=4,
         qkv_bias=False,
-        drop=0.,
-        attn_drop=0.,
-        drop_path=0.,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
         act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm
+        norm_layer=nn.LayerNorm,
     ):
         super().__init__()
 
@@ -4399,19 +4392,14 @@ class SwinTransformerLayer(nn.Module):
             num_heads=num_heads,
             qkv_bias=qkv_bias,
             attn_drop=attn_drop,
-            proj_drop=drop
+            proj_drop=drop,
         )
 
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(c)
 
         mlp_hidden_dim = int(c * mlp_ratio)
-        self.mlp = Mlp(
-            in_features=c,
-            hidden_features=mlp_hidden_dim,
-            act_layer=act_layer,
-            drop=drop
-        )
+        self.mlp = Mlp(in_features=c, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def create_mask(self, x, H, W):
         Hp = int(np.ceil(H / self.window_size)) * self.window_size
@@ -4419,15 +4407,11 @@ class SwinTransformerLayer(nn.Module):
 
         img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)
 
-        h_slices = (
-            (0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None)
-        )
+        h_slices = ((0, -self.window_size), slice(-self.window_size, -self.shift_size), slice(-self.shift_size, None))
         w_slices = (
             slice(0, -self.window_size),
             slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None)
+            slice(-self.shift_size, None),
         )
 
         cnt = 0
@@ -4440,18 +4424,14 @@ class SwinTransformerLayer(nn.Module):
         mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
 
         attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        attn_mask = attn_mask.masked_fill(
-            attn_mask != 0,
-            torch.tensor(-100.0, device=x.device)
-        ).masked_fill(
-            attn_mask == 0,
-            torch.tensor(0.0, device=x.device)
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, torch.tensor(-100.0, device=x.device)).masked_fill(
+            attn_mask == 0, torch.tensor(0.0, device=x.device)
         )
 
         return attn_mask
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        _b, c, h, w = x.shape
         x = x.permute(0, 2, 3, 1).contiguous()
 
         attn_mask = self.create_mask(x, h, w)
@@ -4467,11 +4447,7 @@ class SwinTransformerLayer(nn.Module):
         _, hp, wp, _ = x.shape
 
         if self.shift_size > 0:
-            shifted_x = torch.roll(
-                x,
-                shifts=(-self.shift_size, -self.shift_size),
-                dims=(1, 2)
-            )
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
             shifted_x = x
             attn_mask = None
@@ -4480,21 +4456,12 @@ class SwinTransformerLayer(nn.Module):
         x_windows = x_windows.view(-1, self.window_size * self.window_size, c)
 
         attn_windows = self.attn(x_windows, mask=attn_mask)
-        attn_windows = attn_windows.view(
-            -1,
-            self.window_size,
-            self.window_size,
-            c
-        )
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, c)
 
         shifted_x = window_reverse(attn_windows, self.window_size, hp, wp)
 
         if self.shift_size > 0:
-            x = torch.roll(
-                shifted_x,
-                shifts=(self.shift_size, self.shift_size),
-                dims=(1, 2)
-            )
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
 
@@ -4510,6 +4477,7 @@ class SwinTransformerLayer(nn.Module):
 
 class SwinTransformerBlock(nn.Module):
     """Swin Transformer block."""
+
     def __init__(self, c1, c2, num_heads, num_layers, window_size=8):
         super().__init__()
 
@@ -4520,15 +4488,14 @@ class SwinTransformerBlock(nn.Module):
         self.window_size = window_size
         self.shift_size = window_size // 2
 
-        self.tr = nn.Sequential(*(
-            SwinTransformerLayer(
-                c2,
-                num_heads=num_heads,
-                window_size=window_size,
-                shift_size=0 if i % 2 == 0 else self.shift_size
+        self.tr = nn.Sequential(
+            *(
+                SwinTransformerLayer(
+                    c2, num_heads=num_heads, window_size=window_size, shift_size=0 if i % 2 == 0 else self.shift_size
+                )
+                for i in range(num_layers)
             )
-            for i in range(num_layers)
-        ))
+        )
 
     def forward(self, x):
         if self.conv is not None:
@@ -4540,15 +4507,11 @@ class SwinTransformerBlock(nn.Module):
 
 class C3STR(C3):
     """C3 module with Swin Transformer Block."""
+
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
         super().__init__(c1, c2, n, shortcut, g, e)
 
         c_ = int(c2 * e)
         num_heads = max(1, c_ // 32)
 
-        self.m = SwinTransformerBlock(
-            c_,
-            c_,
-            num_heads=num_heads,
-            num_layers=n
-        )
+        self.m = SwinTransformerBlock(c_, c_, num_heads=num_heads, num_layers=n)

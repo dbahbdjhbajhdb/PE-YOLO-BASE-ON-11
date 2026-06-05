@@ -10,45 +10,45 @@ scales:
   x: [1.00, 1.50, 512]
 
 backbone:
-  - [-1, 1, RFAConv, [64, 3, 2]]        # 0
-  - [-1, 1, RFAConv, [128, 3, 2]]       # 1
-  - [-1, 2, C3k2, [256, False, 0.25]]   # 2
-  - [-1, 1, RFAConv, [256, 3, 2]]       # 3
-  - [-1, 2, C3k2, [512, False, 0.25]]   # 4 (skip-1 source)
-  - [-1, 1, RFAConv, [512, 3, 2]]       # 5
-  - [-1, 2, C3k2, [512, True]]          # 6 (skip-2 source)
-  - [-1, 1, RFAConv, [1024, 3, 2]]      # 7
-  - [-1, 2, C3k2, [1024, True]]         # 8
-  - [-1, 1, SPPF, [1024, 5]]            # 9
-  - [-1, 2, C2PSA, [1024]]              # 10
+  - [-1, 1, RFAConv, [64, 3, 2]] # 0
+  - [-1, 1, RFAConv, [128, 3, 2]] # 1
+  - [-1, 2, C3k2, [256, False, 0.25]] # 2
+  - [-1, 1, RFAConv, [256, 3, 2]] # 3
+  - [-1, 2, C3k2, [512, False, 0.25]] # 4 (skip-1 source)
+  - [-1, 1, RFAConv, [512, 3, 2]] # 5
+  - [-1, 2, C3k2, [512, True]] # 6 (skip-2 source)
+  - [-1, 1, RFAConv, [1024, 3, 2]] # 7
+  - [-1, 2, C3k2, [1024, True]] # 8
+  - [-1, 1, SPPF, [1024, 5]] # 9
+  - [-1, 2, C2PSA, [1024]] # 10
 
 head:
   # ---------------- Top-down Path ----------------
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 11
-  - [[-1, 6], 1, Concat, [1]]                   # 12
-  - [-1, 2, C3k2, [512, False]]                 # 13
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 11
+  - [[-1, 6], 1, Concat, [1]] # 12
+  - [-1, 2, C3k2, [512, False]] # 13
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 14
-  - [[-1, 4], 1, Concat, [1]]                   # 15
-  - [-1, 2, C3k2, [256, False]]                 # 16
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 14
+  - [[-1, 4], 1, Concat, [1]] # 15
+  - [-1, 2, C3k2, [256, False]] # 16
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 17
-  - [[-1, 2], 1, Concat, [1]]                   # 18
-  - [-1, 2, C3k2, [128, False]]                 # 19
-  - [-1, 1, DynamicAttention, []]               # 20
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 17
+  - [[-1, 2], 1, Concat, [1]] # 18
+  - [-1, 2, C3k2, [128, False]] # 19
+  - [-1, 1, DynamicAttention, []] # 20
 
   # ---------------- Bottom-up Path (PANet + EdgeSkipGate) ----------------
   # 绿线1: 来自 backbone layer 4
-  - [19, 1, Conv, [128, 3, 2]]                  # 21
-  - [4, 1, EdgeSkipGate, [7, 16]]               # 22  (门控滤噪)
-  - [[21, 22, 16], 1, Concat, [1]]              # 23
-  - [-1, 2, C3k2, [256, False]]                 # 24
+  - [19, 1, Conv, [128, 3, 2]] # 21
+  - [4, 1, EdgeSkipGate, [7, 16]] # 22  (门控滤噪)
+  - [[21, 22, 16], 1, Concat, [1]] # 23
+  - [-1, 2, C3k2, [256, False]] # 24
 
   # 绿线2: 来自 backbone layer 6
-  - [-1, 1, Conv, [256, 3, 2]]                  # 25
-  - [6, 1, EdgeSkipGate, [7, 16]]               # 26  (门控滤噪)
-  - [[25, 26, 13], 1, Concat, [1]]              # 27
-  - [-1, 2, C3k2, [512, False]]                 # 28
+  - [-1, 1, Conv, [256, 3, 2]] # 25
+  - [6, 1, EdgeSkipGate, [7, 16]] # 26  (门控滤噪)
+  - [[25, 26, 13], 1, Concat, [1]] # 27
+  - [-1, 2, C3k2, [512, False]] # 28
 
   # ---------------- Detect Head ----------------
-  - [[20, 24, 28], 1, Detect, [nc]]             # 29
+  - [[20, 24, 28], 1, Detect, [nc]] # 29

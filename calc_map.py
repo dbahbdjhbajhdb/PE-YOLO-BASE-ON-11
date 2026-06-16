@@ -1,19 +1,20 @@
-import json
 import os
+
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
 # =======================================================
 # 1. 这里填你手头已有的 COCO 格式验证集标签路径 (绝对路径)
 #    例如: r'C:\data\VisDrone\annotations\visdrone_val.json'
-GT_JSON_PATH = r'C:\datasets\visdrone2019-coco\VisDrone2019-DET-val\annotations'
+GT_JSON_PATH = r"C:\datasets\visdrone2019-coco\VisDrone2019-DET-val\annotations"
 
 # 2. 这里填 YOLO 刚刚生成的预测文件路径
 #    例如: r'C:\ultralytics-main\runs\detect\val3\predictions.json'
-PRED_JSON_PATH = r'C:\ultralytics-main\runs\detect\val3\predictions.json'
+PRED_JSON_PATH = r"C:\ultralytics-main\runs\detect\val3\predictions.json"
 
 
 # =======================================================
+
 
 def main():
     if not os.path.exists(GT_JSON_PATH):
@@ -40,7 +41,7 @@ def main():
 
     print("开始评测 (Evaluating)...")
     # 创建评测对象
-    cocoEval = COCOeval(cocoGt, cocoDt, 'bbox')
+    cocoEval = COCOeval(cocoGt, cocoDt, "bbox")
 
     # 这里的 imgIds 列表用于指定只评测哪些图片，默认是所有
     # cocoEval.params.imgIds = sorted(cocoGt.getImgIds())
@@ -50,5 +51,5 @@ def main():
     cocoEval.summarize()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -1,5 +1,6 @@
-import os
 import json
+import os
+
 import cv2
 from tqdm import tqdm
 
@@ -9,10 +10,7 @@ ROOT_PATH = r"C:\date\Visdrone2019"
 
 # 2. 你的类别名称 (顺序必须和 classes.txt 或者你训练 YOLO 时的 yaml 文件一致)
 # ⚠️ 注意：VisDrone 的类别通常如下，如果你的不同请修改！
-CLASSES = [
-    "pedestrian", "people", "bicycle", "car", "van",
-    "truck", "tricycle", "awning-tricycle", "bus", "motor"
-]
+CLASSES = ["pedestrian", "people", "bicycle", "car", "van", "truck", "tricycle", "awning-tricycle", "bus", "motor"]
 
 # 3. 你想转换哪个集？ (通常需要运行两次：一次填 "train"，一次填 "val")
 PHASE = "train"
@@ -27,28 +25,27 @@ SAVE_PATH = os.path.join(ROOT_PATH, "annotations", f"instances_{PHASE}.json")
 
 # ===============================================================
 
+
 def yolo_to_coco():
     # 如果 annotations 文件夹不存在，创建它
     if not os.path.exists(os.path.dirname(SAVE_PATH)):
         os.makedirs(os.path.dirname(SAVE_PATH))
 
     # 初始化 COCO 字典
-    dataset = {
-        "images": [],
-        "annotations": [],
-        "categories": []
-    }
+    dataset = {"images": [], "annotations": [], "categories": []}
 
     # 1. 写入类别信息 (Categories)
     for i, cls_name in enumerate(CLASSES):
-        dataset["categories"].append({
-            "id": i + 1,  # COCO 类别 ID 习惯从 1 开始
-            "name": cls_name,
-            "supercategory": "object"
-        })
+        dataset["categories"].append(
+            {
+                "id": i + 1,  # COCO 类别 ID 习惯从 1 开始
+                "name": cls_name,
+                "supercategory": "object",
+            }
+        )
 
     # 获取所有图片
-    image_files = [f for f in os.listdir(IMG_DIR) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+    image_files = [f for f in os.listdir(IMG_DIR) if f.lower().endswith((".jpg", ".png", ".jpeg"))]
 
     annotation_id = 1
     image_id = 1
@@ -66,25 +63,28 @@ def yolo_to_coco():
 
         height, width, _ = img.shape
 
-        dataset["images"].append({
-            "id": image_id,
-            "file_name": img_file,  # 这里的名字必须和文件夹里的文件名完全一致
-            "width": width,
-            "height": height
-        })
+        dataset["images"].append(
+            {
+                "id": image_id,
+                "file_name": img_file,  # 这里的名字必须和文件夹里的文件名完全一致
+                "width": width,
+                "height": height,
+            }
+        )
 
         # --- B. 处理对应的 TXT 标签 ---
         txt_name = os.path.splitext(img_file)[0] + ".txt"
         txt_path = os.path.join(TXT_DIR, txt_name)
 
         if os.path.exists(txt_path):
-            with open(txt_path, "r") as f:
+            with open(txt_path) as f:
                 lines = f.readlines()
 
             for line in lines:
                 parts = line.strip().split()
                 # 过滤掉空行或格式错误的行
-                if len(parts) < 5: continue
+                if len(parts) < 5:
+                    continue
 
                 # 读取 YOLO 格式 (归一化)
                 cls_id = int(parts[0])
@@ -100,15 +100,17 @@ def yolo_to_coco():
                 y_min = (y_center * height) - (h_abs / 2)
 
                 # 写入标注
-                dataset["annotations"].append({
-                    "id": annotation_id,
-                    "image_id": image_id,
-                    "category_id": cls_id + 1,  # ID + 1 (对应上面的 categories)
-                    "bbox": [x_min, y_min, w_abs, h_abs],  # [x, y, w, h]
-                    "area": w_abs * h_abs,
-                    "iscrowd": 0,
-                    "segmentation": []  # 检测任务留空即可
-                })
+                dataset["annotations"].append(
+                    {
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": cls_id + 1,  # ID + 1 (对应上面的 categories)
+                        "bbox": [x_min, y_min, w_abs, h_abs],  # [x, y, w, h]
+                        "area": w_abs * h_abs,
+                        "iscrowd": 0,
+                        "segmentation": [],  # 检测任务留空即可
+                    }
+                )
                 annotation_id += 1
 
         image_id += 1

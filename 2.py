@@ -1,6 +1,8 @@
-import pandas as pd
-from ultralytics.utils.plotting import plot_results
 import os
+
+import pandas as pd
+
+from ultralytics.utils.plotting import plot_results
 
 # ================= 设置 =================
 # 你的原始 CSV 文件路径
@@ -10,7 +12,7 @@ end_epoch = 200
 # =======================================
 
 # 1. 读取原始数据
-#有些 csv 可能会有空格，strip() 去除列名空格防止报错
+# 有些 csv 可能会有空格，strip() 去除列名空格防止报错
 df = pd.read_csv(csv_path)
 df.columns = [c.strip() for c in df.columns]
 
@@ -27,6 +29,6 @@ df_cut.to_csv(temp_csv_path, index=False)
 # 它会根据 cut.csv 生成 results_cut.png
 plot_results(temp_csv_path)
 
-print(f"处理完成！")
+print("处理完成！")
 print(f"截取后的数据已保存至: {os.path.abspath(temp_csv_path)}")
 print(f"最终图片已生成至: {os.path.abspath('results_cut.png')}")
